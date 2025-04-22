@@ -1,0 +1,89 @@
+/* 
+ * YT-Article Craft - Main Stylesheet
+ */
+
+QMainWindow, QDialog {
+    background-color: #f5f5f5;
+}
+
+QMenuBar, QStatusBar {
+    background-color: #ffffff;
+}
+
+QDockWidget::title {
+    background-color: #e0e0e0;
+    padding: 5px;
+}
+
+QSplitter::handle {
+    background-color: #cccccc;
+}
+
+QListView, QTreeView {
+    background-color: #ffffff;
+    border: 1px solid #d0d0d0;
+    border-radius: 3px;
+}
+
+QListView::item, QTreeView::item {
+    padding: 5px;
+}
+
+QListView::item:selected, QTreeView::item:selected {
+    background-color: #007bff;
+    color: white;
+}
+
+QTextEdit {
+    background-color: #ffffff;
+    border: 1px solid #d0d0d0;
+    border-radius: 3px;
+}
+
+QPushButton {
+    background-color: #007bff;
+    color: white;
+    border: none;
+    padding: 5px 15px;
+    border-radius: 3px;
+}
+
+QPushButton:hover {
+    background-color: #0069d9;
+}
+
+QPushButton:pressed {
+    background-color: #0062cc;
+}
+
+QPushButton:disabled {
+    background-color: #cccccc;
+    color: #999999;
+}
+
+QLineEdit, QComboBox {
+    background-color: #ffffff;
+    border: 1px solid #d0d0d0;
+    border-radius: 3px;
+    padding: 5px;
+}
+
+QToolBar {
+    background-color: #f0f0f0;
+    border: 1px solid #d0d0d0;
+    spacing: 3px;
+}
+
+QToolButton {
+    background-color: transparent;
+    border-radius: 3px;
+    padding: 3px;
+}
+
+QToolButton:hover {
+    background-color: #e0e0e0;
+}
+
+QToolButton:pressed {
+    background-color: #d0d0d0;
+} 
