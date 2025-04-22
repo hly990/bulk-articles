@@ -15,6 +15,7 @@ from app.constants import UI_MAIN_TITLE, DEFAULT_STYLE_SHEET
 from views.task_dock import TaskDock
 from views.editor_pane import EditorPane
 from views.preview_pane import PreviewPane
+from views.dialogs.settings_dialog import SettingsDialog
 
 class MainWindow(QMainWindow):
     """Main application window with three panel layout"""
@@ -154,6 +155,7 @@ class MainWindow(QMainWindow):
         
         # Settings action
         self.settings_action = QAction("&Settings", self)
+        self.settings_action.setShortcut("Ctrl+,")
         self.settings_action.triggered.connect(self._on_settings)
         self.file_menu.addAction(self.settings_action)
         
@@ -214,8 +216,52 @@ class MainWindow(QMainWindow):
     
     def _on_settings(self):
         """Handle settings action"""
-        # To be implemented
-        self.status_bar.showMessage("Settings opened")
+        settings_dialog = SettingsDialog(self, self.config)
+        if settings_dialog.exec():
+            # Update UI based on new settings
+            self._apply_settings()
+            self.status_bar.showMessage("Settings updated")
+    
+    def _apply_settings(self):
+        """Apply settings from configuration"""
+        # Update window size if needed
+        
+        # Update panel sizes
+        task_dock_width = self.config.get("ui", "task_dock_width", 250)
+        preview_pane_width = self.config.get("ui", "preview_pane_width", 350)
+        
+        # Calculate editor width based on window width minus task and preview widths
+        window_width = self.width()
+        editor_width = window_width - task_dock_width - preview_pane_width
+        
+        # Update splitter sizes
+        self.main_splitter.setSizes([task_dock_width, editor_width, preview_pane_width])
+        
+        # Apply theme if necessary
+        theme = self.config.get("app", "theme", "default")
+        # In a full implementation, we would apply theme changes here
+        
+        # Update font - this would ideally happen at the application level
+        # but for now we can update the parts we have access to
+        font_family = self.config.get("ui", "font_family", "Segoe UI")
+        font_size = self.config.get("ui", "font_size", 10)
+        
+        # Apply font to application (would require more complete implementation)
+        # For now we just update what we can access
+        
+        # Update editor font
+        editor_font_family = self.config.get("ui", "editor_font_family", "Consolas")
+        editor_font_size = self.config.get("ui", "editor_font_size", 12)
+        self.editor_pane.set_font(editor_font_family, editor_font_size)
+        
+        # Update auto-save settings
+        auto_save = self.config.get("app", "auto_save", True)
+        auto_save_interval = self.config.get("app", "auto_save_interval", 300)
+        # Implementation of auto-save would be here
+        
+        # Update word count visibility in status bar if applicable
+        show_word_count = self.config.get("editor", "show_word_count", True)
+        # Implementation would update status bar configuration
     
     def closeEvent(self, event):
         """Handle window close event"""

@@ -49,7 +49,8 @@ class EditorPane(QWidget):
         
         # Set editor font
         font = QFont("Segoe UI", 11)
-        self.editor.setFont(font)
+        document = self.editor.document()
+        document.setDefaultFont(font)
         
         # Add editor to layout
         self.layout.addWidget(self.editor)
@@ -119,6 +120,49 @@ class EditorPane(QWidget):
         self.insert_image_action = QAction("Insert Image", self)
         self.insert_image_action.triggered.connect(self._on_insert_image)
         self.toolbar.addAction(self.insert_image_action)
+    
+    def set_font(self, family, size):
+        """Set the editor font
+        
+        Args:
+            family (str): Font family name
+            size (int): Font size in points
+        """
+        # Create font object
+        font = QFont(family, size)
+        
+        # Store the current content and cursor position
+        current_content = self.editor.toHtml()
+        cursor_position = self.editor.textCursor().position()
+        
+        # Set as default font for editor (for new text)
+        document = self.editor.document()
+        document.setDefaultFont(font)
+        
+        # Restore the content without modifying it
+        self.editor.blockSignals(True)  # Prevent content change signals
+        self.editor.setHtml(current_content)
+        
+        # Restore cursor position
+        cursor = self.editor.textCursor()
+        cursor.setPosition(cursor_position)
+        self.editor.setTextCursor(cursor)
+        self.editor.blockSignals(False)
+        
+        # Update font selectors in toolbar
+        # Find the closest matching font in the combo box
+        found_index = self.font_family.findText(family)
+        if found_index >= 0:
+            self.font_family.setCurrentIndex(found_index)
+        else:
+            # If not found, set to Default
+            self.font_family.setCurrentIndex(0)
+        
+        # Set the font size if it exists in the combobox
+        size_str = str(size)
+        found_index = self.font_size.findText(size_str)
+        if found_index >= 0:
+            self.font_size.setCurrentIndex(found_index)
     
     def _on_font_family_changed(self, family):
         """Handle font family change"""
