@@ -108,6 +108,46 @@ class VideoMetadata:  # pylint: disable=too-many-instance-attributes
         return cls(**data)  # type: ignore[arg-type]
 
 
+@dataclass
+class VideoFormat:
+    """Representation of a single yt‑dlp format entry, simplified for UI."""
+
+    format_id: str
+    ext: str
+    resolution: str  # e.g. "1920x1080" or "audio only"
+    filesize: Optional[int]  # bytes, may be None
+    tbr: Optional[float]  # total bitrate (kbits/s)
+    vcodec: str
+    acodec: str
+
+    @classmethod
+    def from_raw(cls, fmt: Dict[str, Any]) -> "VideoFormat":
+        return cls(
+            format_id=fmt.get("format_id", ""),
+            ext=fmt.get("ext", ""),
+            resolution=fmt.get("resolution") or fmt.get("format_note") or "audio only",
+            filesize=fmt.get("filesize") or fmt.get("filesize_approx"),
+            tbr=fmt.get("tbr"),
+            vcodec=fmt.get("vcodec", ""),
+            acodec=fmt.get("acodec", ""),
+        )
+
+    def human_size(self) -> str:
+        if not self.filesize:
+            return "?"
+        units = ["B", "KB", "MB", "GB"]
+        size = float(self.filesize)
+        for unit in units:
+            if size < 1024.0:
+                return f"{size:.1f}{unit}"
+            size /= 1024.0
+        return f"{size:.1f}TB"
+
+    def __str__(self) -> str:  # pragma: no cover
+        size = self.human_size()
+        return f"{self.format_id} {self.ext} {self.resolution} {size}bps={self.tbr or '?'}k"
+
+
 class MetadataExtractor:
     """Fetch & cache video metadata using :class:`YtDlpWrapper`."""
 
@@ -166,4 +206,17 @@ class MetadataExtractor:
         except Exception as exc:  # pragma: no cover
             self.logger.warning("Failed to save metadata cache: %s", exc)
 
-        return meta 
+        return meta
+
+    # ------------------------------------------------------------------
+    # Formats API
+    # ------------------------------------------------------------------
+
+    def list_formats(self, url: str, *, use_cache: bool = True) -> list[VideoFormat]:
+        """Return a list of available :class:`VideoFormat` objects for *url*."""
+        meta = self.get_metadata(url, use_cache=use_cache)
+        raw_formats = meta.formats or []
+        parsed = [VideoFormat.from_raw(f) for f in raw_formats if f.get("vcodec") != "none" or f.get("acodec") != "none"]
+        # sort by resolution or bitrate descending
+        parsed.sort(key=lambda f: (f.tbr or 0), reverse=True)
+        return parsed 

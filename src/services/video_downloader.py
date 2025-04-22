@@ -21,10 +21,13 @@ from queue import Queue, Empty
 from typing import Dict, Optional, List
 import re
 from PyQt6.QtCore import QObject, pyqtSignal
+import signal
+import time
+import subprocess
 
 from .yt_dlp_wrapper import YtDlpWrapper, YtDlpError
 from .media_storage import MediaStorage
-from .youtube_utils import YouTubeValidator, MetadataExtractor
+from .youtube_utils import YouTubeValidator, MetadataExtractor, VideoFormat
 
 __all__ = [
     "DownloadState",
@@ -80,6 +83,31 @@ _PROGRESS_RE = re.compile(
 )
 
 
+# ------------------------------------------------------------------
+# Error hierarchy (task 2.7)
+# ------------------------------------------------------------------
+
+
+class DownloadError(RuntimeError):
+    """Base download error raised for non‑successful tasks."""
+
+
+class NetworkError(DownloadError):
+    """Network‑related issues, e.g. timeout, DNS, connection reset."""
+
+
+class GeoRestrictionError(DownloadError):
+    """Video unavailable in current region."""
+
+
+class AgeRestrictionError(DownloadError):
+    """Video requires age verification (not supported)."""
+
+
+class InvalidURLError(DownloadError):
+    """Provided URL is not recognised or invalid."""
+
+
 class VideoDownloader(QObject):
     """Download manager implementing a simple FIFO queue with Qt signals."""
 
@@ -95,6 +123,8 @@ class VideoDownloader(QObject):
         wrapper: Optional[YtDlpWrapper] = None,
         storage: Optional[MediaStorage] = None,
         logger: Optional[logging.Logger] = None,
+        max_retries: int = 3,
+        timeout: int = 300,
     ) -> None:
         super().__init__()  # QObject init
 
@@ -107,6 +137,9 @@ class VideoDownloader(QObject):
         self._manager_thread = threading.Thread(target=self._worker_loop, daemon=True)
         self._stop_event = threading.Event()
         self._manager_thread.start()
+
+        self._max_retries = max_retries
+        self._timeout = timeout
 
     # ------------------------------------------------------------------
     # Public API
@@ -189,8 +222,17 @@ class VideoDownloader(QObject):
             return
 
     def _determine_output_path(self, meta: "VideoMetadata", *, preferred_quality: str) -> Path:  # noqa: D401
-        # Simple: always mp4 – extension may differ; we keep best guess.
-        return self.storage.get_video_path(meta.video_id, fmt="mp4")
+        # Try to choose extension based on quality/format id
+        ext = "mp4"
+        if "+" in preferred_quality:  # merged formats (id+id)
+            ext = "mkv"
+        else:
+            # search format list for matching id
+            for fmt in meta.formats:
+                if fmt.get("format_id") == preferred_quality:
+                    ext = fmt.get("ext", "mp4")
+                    break
+        return self.storage.get_video_path(meta.video_id, fmt=ext)
 
     # ------------------------------------------------------------------
     # CLI execution with real‑time progress parsing
@@ -199,9 +241,7 @@ class VideoDownloader(QObject):
     def _execute_download_cli(self, task: DownloadTask, output_path: Path) -> bool:
         """Run yt‑dlp CLI and emit progress. Return *True* if success."""
 
-        import subprocess
-
-        cmd = [
+        cmd_base = [
             "yt-dlp",
             "-f",
             task.quality,
@@ -210,39 +250,113 @@ class VideoDownloader(QObject):
             task.url,
         ]
 
-        self.logger.debug("Running CLI: %s", cmd)
+        attempts = 0
+        while attempts < self._max_retries:
+            attempts += 1
+            cmd = [*cmd_base]
+            if attempts > 1:
+                self.logger.info("Retrying download (attempt %d/%d)...", attempts, self._max_retries)
 
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            universal_newlines=True,
-        )
+            self.logger.debug("Running CLI: %s", cmd)
 
-        # Read line‑buffered output
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True,
+            )
+
+            # timeout watchdog
+            try:
+                return self._monitor_process(proc, task)
+            except NetworkError as nerr:
+                self.logger.warning("Transient network error: %s", nerr)
+                if attempts < self._max_retries:
+                    time.sleep(5)
+                    continue
+                task.error = str(nerr)
+                task.state = DownloadState.FAILED
+                self.state_changed.emit(task)
+                self.download_error.emit(task, task.error)
+                return False
+            except DownloadError as derr:
+                task.error = str(derr)
+                task.state = DownloadState.FAILED
+                self.state_changed.emit(task)
+                self.download_error.emit(task, task.error)
+                return False
+
+        return False  # shouldn't reach
+
+    # ------------------------------------------------------------------
+    # Helper: monitor yt-dlp proc & parse output, with timeout
+    # ------------------------------------------------------------------
+
+    def _monitor_process(self, proc: "subprocess.Popen[str]", task: DownloadTask) -> bool:
+        """Monitor *proc* for progress, enforce timeout and classify errors."""
+        import select, time
+
+        start_time = time.time()
+        line_buffer = ""
+
         if proc.stdout is None:  # pragma: no cover
-            raise RuntimeError("Failed to capture yt-dlp output")
+            raise NetworkError("yt-dlp stdout unavailable")
 
-        for raw_line in proc.stdout:
-            line = raw_line.strip("\r\n")
-            match = _PROGRESS_RE.search(line)
-            if match:
-                progress = DownloadProgress(
-                    percent=float(match.group("percent")),
-                    speed=match.group("speed"),
-                    eta=match.group("eta"),
-                )
-                self.progress_changed.emit(task, progress)
+        while True:
+            if time.time() - start_time > self._timeout:
+                proc.kill()
+                raise NetworkError("Download timed out")
+
+            ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+            if ready:
+                raw_line = proc.stdout.readline()
+                if not raw_line:
+                    # EOF
+                    if proc.poll() is not None:
+                        break
+                    continue
+                line = raw_line.strip("\r\n")
+                line_buffer += line + "\n"
+
+                match = _PROGRESS_RE.search(line)
+                if match:
+                    progress = DownloadProgress(
+                        percent=float(match.group("percent")),
+                        speed=match.group("speed"),
+                        eta=match.group("eta"),
+                    )
+                    self.progress_changed.emit(task, progress)
+
+            if proc.poll() is not None:
+                break
 
         proc.wait()
 
         if proc.returncode != 0:
-            task.state = DownloadState.FAILED
-            task.error = f"yt-dlp exited with code {proc.returncode}"
-            self.state_changed.emit(task)
-            self.download_error.emit(task, task.error)
-            return False
+            # classify
+            err_cls = self._classify_error(line_buffer)
+            raise err_cls(f"yt-dlp exited with code {proc.returncode}")
 
-        return True 
+        return True
+
+    # ------------------------------------------------------------------
+    # Error classification helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _classify_error(output: str) -> type[DownloadError]:
+        txt = output.lower()
+        if "proxy" in txt or "timed out" in txt or "connection" in txt or "http error" in txt:
+            return NetworkError
+        if "restricted" in txt and "geo" in txt:
+            return GeoRestrictionError
+        if "age" in txt and "restricted" in txt:
+            return AgeRestrictionError
+        return DownloadError
+
+    # New helper ------------------------------------------------------
+    def get_available_formats(self, url: str, *, use_cache: bool = True) -> list[VideoFormat]:
+        """Expose format list via internal MetadataExtractor."""
+        return MetadataExtractor(storage=self.storage, wrapper=self.wrapper).list_formats(url, use_cache=use_cache) 
