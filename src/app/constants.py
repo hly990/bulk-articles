@@ -1,25 +1,35 @@
 """
-Constants for the YT-Article Craft application
+Application constants
 
-This module defines constants used throughout the application.
+This module defines constants used throughout the application
 """
 
 # Task status constants
 STATUS_PENDING = "pending"
-STATUS_DOWNLOADING = "downloading"
-STATUS_TRANSCRIBING = "transcribing"
-STATUS_EXTRACTING_KEYFRAMES = "extracting_keyframes"
-STATUS_GENERATING_ARTICLE = "generating_article"
+STATUS_IN_PROGRESS = "in_progress"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
+
+# Article tone constants
+TONE_PROFESSIONAL = "professional"
+TONE_CASUAL = "casual"
+TONE_TECHNICAL = "technical"
+TONE_ENTHUSIASTIC = "enthusiastic"
+TONE_FORMAL = "formal"
+TONE_INFORMATIVE = "informative"
+
+# Database constants
+DEFAULT_DB_FILENAME = "ytarticlecraft.db"
+DB_VERSION = 1
+
+# UI constants
+DEFAULT_FONT_SIZE = 12
+DEFAULT_FONT_FAMILY = "Arial"
 
 # Task status display names (for UI)
 STATUS_DISPLAY_NAMES = {
     STATUS_PENDING: "Pending",
-    STATUS_DOWNLOADING: "Downloading Video",
-    STATUS_TRANSCRIBING: "Transcribing Audio",
-    STATUS_EXTRACTING_KEYFRAMES: "Extracting Keyframes",
-    STATUS_GENERATING_ARTICLE: "Generating Article",
+    STATUS_IN_PROGRESS: "In Progress",
     STATUS_COMPLETED: "Completed",
     STATUS_FAILED: "Failed"
 }
@@ -27,19 +37,13 @@ STATUS_DISPLAY_NAMES = {
 # Valid task status values
 VALID_STATUSES = [
     STATUS_PENDING,
-    STATUS_DOWNLOADING,
-    STATUS_TRANSCRIBING,
-    STATUS_EXTRACTING_KEYFRAMES,
-    STATUS_GENERATING_ARTICLE,
+    STATUS_IN_PROGRESS,
     STATUS_COMPLETED,
     STATUS_FAILED
 ]
 
 # Template tone constants
-TONE_PROFESSIONAL = "professional"
-TONE_CASUAL = "casual"
 TONE_STORYTELLING = "storytelling"
-TONE_TECHNICAL = "technical"
 TONE_EDUCATIONAL = "educational"
 
 # Valid template tones
@@ -66,7 +70,6 @@ YOUTUBE_URL_PATTERN = r'(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?v=|
 # Default application settings
 DEFAULT_WINDOW_WIDTH = 1280
 DEFAULT_WINDOW_HEIGHT = 800
-DEFAULT_FONT_SIZE = 12
 DEFAULT_EDITOR_FONT = "DejaVu Sans Mono"
 DEFAULT_PREVIEW_FONT = "DejaVu Sans"
 
