@@ -20,6 +20,7 @@ import subprocess
 from typing import Any, Dict, List, Optional, Union
 import io
 import contextlib
+import re
 
 try:
     import yt_dlp
@@ -218,73 +219,141 @@ class YtDlpWrapper:
     def download_subtitle(
         self, 
         url: str, 
-        lang_code: str, 
-        output_path: Union[str, Path],
-        auto_generated: bool = False,
-        format: str = 'srt'
-    ) -> Path:
-        """Download subtitle for a specific language.
+        output_path: Union[str, Path], 
+        language: str = 'en',
+        formats: List[str] = ['vtt', 'srt'],
+        source: str = 'any'  # 'manual', 'automatic', 'translated', or 'any'
+    ) -> Dict[str, Any]:
+        """Download subtitles for a YouTube video.
         
         Parameters
         ----------
         url : str
-            URL of the video to download subtitles for
-        lang_code : str
-            Language code of the subtitle to download (e.g., 'en', 'es', 'fr')
-        output_path : Union[str, Path]
+            URL of the YouTube video
+        output_path : str | Path
             Path to save the subtitle file
-        auto_generated : bool, default False
-            Whether to download auto-generated subtitles
-        format : str, default 'srt'
-            Format of the subtitle file ('srt', 'vtt', 'json', etc.)
+        language : str
+            Language code for the subtitle (default: 'en')
+        formats : List[str]
+            Preferred subtitle formats in order of preference (default: ['vtt', 'srt'])
+        source : str
+            Source of subtitles: 'manual', 'automatic', 'translated', or 'any' (default: 'any')
             
         Returns
         -------
-        Path
-            Path to the downloaded subtitle file
+        Dict[str, Any]
+            Dictionary with information about the downloaded subtitle:
+            {
+                'ext': 'vtt',
+                'name': 'English',
+                'language_name': 'English',
+                'language_code': 'en',
+                'filepath': '/path/to/subtitle.vtt',
+                'caption_type': 'manual',
+                'has_speaker_id': False,
+                'is_default': True,
+                'is_auto_generated': False
+            }
             
         Raises
         ------
         YtDlpError
-            If there's an error downloading the subtitle
+            If there's an error downloading subtitles or if the requested language is not available
         """
-        output_path = Path(output_path)
-        
-        # Create parent directory if it doesn't exist
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        extra_args = []
-        
-        # Add format option
-        extra_args.extend(['--sub-format', format])
-        
-        # Add language option
-        extra_args.extend(['--sub-langs', lang_code])
-        
-        # Add auto-generated option if specified
-        if auto_generated:
-            extra_args.append('--write-auto-sub')
-        else:
-            extra_args.append('--write-sub')
-        
-        # Add output template
-        output_template = str(output_path)
-        extra_args.extend(['--output', output_template])
-        
         try:
-            self.run_cli(
-                url=url,
-                extra_args=extra_args,
-                capture_stdout=True
-            )
+            output_path = Path(output_path)
             
-            # Check if file exists
-            if not output_path.exists():
-                raise YtDlpError(f"Subtitle file not generated at {output_path}")
+            # Create parent directory if it doesn't exist
+            output_path.parent.mkdir(parents=True, exist_ok=True)
             
-            return output_path
+            # First check if the requested language is available
+            available_subtitles = self.list_subtitles(url)
+            
+            # Determine available subtitle sources based on the 'source' parameter
+            sources_to_check = []
+            if source == 'any':
+                sources_to_check = ['manual', 'automatic']
+            else:
+                sources_to_check = [source]
+            
+            # Check if requested language is available in specified sources
+            language_available = False
+            selected_source = None
+            selected_subtitle = None
+            
+            for src in sources_to_check:
+                for sub in available_subtitles.get(src, []):
+                    if sub['language'] == language:
+                        language_available = True
+                        selected_source = src
+                        selected_subtitle = sub
+                        break
+                if language_available:
+                    break
+            
+            if not language_available:
+                raise YtDlpError(f"Subtitles in language '{language}' are not available")
+            
+            # Create yt-dlp options for subtitle download
+            ydl_opts = {
+                'skip_download': True,
+                'subtitleslangs': [language],
+                'writesubtitles': True,
+                'outtmpl': str(output_path.with_suffix('')),
+                'quiet': True,
+                'no_warnings': True,
+            }
+            
+            # Select source type (auto or regular)
+            if selected_source == 'automatic':
+                ydl_opts['writeautomaticsub'] = True
+            else:
+                ydl_opts['writesubtitles'] = True
+            
+            # Format preference
+            for fmt in formats:
+                ydl_opts['subtitlesformat'] = fmt
+                
+                # Try to download with current format
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+                
+                # Check if file was created with current format
+                expected_file = output_path.with_suffix(f'.{language}.{fmt}')
+                if expected_file.exists():
+                    # Rename file to the requested output path if needed
+                    if expected_file != output_path:
+                        shutil.move(expected_file, output_path)
+                    
+                    # Prepare metadata about the downloaded subtitle
+                    result = {
+                        'ext': fmt,
+                        'name': selected_subtitle['name'],
+                        'language_name': selected_subtitle['name'],
+                        'language_code': language,
+                        'filepath': str(output_path),
+                        'caption_type': selected_subtitle.get('caption_type', selected_source),
+                        'has_speaker_id': selected_subtitle.get('has_speaker_id', False),
+                        'is_default': selected_subtitle.get('is_default', False),
+                        'is_auto_generated': selected_source == 'automatic'
+                    }
+                    
+                    # Check for speaker identification in auto captions
+                    if result['is_auto_generated'] and result['has_speaker_id'] == False:
+                        # Sometimes speaker identification is only evident in the file content
+                        with open(output_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read(1000)  # Just check the beginning
+                            if re.search(r'<v\s+[^>]+>', content, re.IGNORECASE) or \
+                               re.search(r'\[speaker\s*\d*\]', content, re.IGNORECASE):
+                                result['has_speaker_id'] = True
+                    
+                    return result
+            
+            # If we reach this point, none of the formats were downloaded successfully
+            raise YtDlpError(f"Failed to download subtitles in any of the requested formats: {formats}")
+            
         except Exception as exc:
-            raise YtDlpError(f"Error downloading subtitle: {exc}")
+            raise YtDlpError(f"Error downloading subtitles: {exc}")
 
     # ------------------------------------------------------------------
     # Internal subtitle parsing helpers 
@@ -631,11 +700,27 @@ class YtDlpWrapper:
             Dictionary with subtitle information:
             {
                 'automatic': [
-                    {'language': 'en', 'format': 'vtt', 'ext': 'vtt', 'name': 'English'},
+                    {
+                        'language': 'en', 
+                        'format': 'vtt', 
+                        'ext': 'vtt', 
+                        'name': 'English',
+                        'caption_type': 'auto_generated',
+                        'has_speaker_id': False,
+                        'is_default': False
+                    },
                     ...
                 ],
                 'manual': [
-                    {'language': 'fr', 'format': 'vtt', 'ext': 'vtt', 'name': 'French'},
+                    {
+                        'language': 'fr', 
+                        'format': 'vtt', 
+                        'ext': 'vtt', 
+                        'name': 'French',
+                        'caption_type': 'manual',
+                        'has_speaker_id': False,
+                        'is_default': True
+                    },
                     ...
                 ]
             }
@@ -690,15 +775,34 @@ class YtDlpWrapper:
                         language_code = parts[0].strip()
                         language_name = parts[1].strip()
                         
-                        # Remove any [default] or other annotations
-                        if '[' in language_name:
+                        # Check if this is the default track
+                        is_default = False
+                        if '[default]' in language_name:
+                            is_default = True
                             language_name = language_name.split('[')[0].strip()
+                        
+                        # Check if this has speaker identification (common in auto captions)
+                        has_speaker_id = False
+                        if current_section == 'automatic' and 'with speaker' in language_name.lower():
+                            has_speaker_id = True
+                            language_name = language_name.replace('with speaker', '').strip()
+                            
+                        # Determine caption type
+                        caption_type = 'manual' if current_section == 'manual' else 'auto_generated'
+                        
+                        # Check for translated captions (these are usually manual with a specific indicator)
+                        if 'translated' in language_name.lower() or '[translated]' in line:
+                            caption_type = 'translated'
+                            language_name = language_name.replace('translated', '').strip()
                             
                         subtitle_info = {
                             'language': language_code,
                             'name': language_name,
                             'format': 'vtt',
-                            'ext': 'vtt'
+                            'ext': 'vtt',
+                            'caption_type': caption_type,
+                            'has_speaker_id': has_speaker_id,
+                            'is_default': is_default
                         }
                         
                         result[current_section].append(subtitle_info)
@@ -706,107 +810,4 @@ class YtDlpWrapper:
             return result
             
         except Exception as exc:
-            raise YtDlpError(f"Error listing subtitles: {exc}")
-    
-    def download_subtitle(
-        self, 
-        url: str, 
-        output_path: Union[str, Path], 
-        language: str = 'en',
-        formats: List[str] = ['vtt', 'srt'],
-        source: str = 'any'  # 'manual', 'automatic', or 'any'
-    ) -> Path:
-        """Download subtitles for a YouTube video.
-        
-        Parameters
-        ----------
-        url : str
-            URL of the YouTube video
-        output_path : str | Path
-            Path to save the subtitle file
-        language : str
-            Language code for the subtitle (default: 'en')
-        formats : List[str]
-            Preferred subtitle formats in order of preference (default: ['vtt', 'srt'])
-        source : str
-            Source of subtitles: 'manual', 'automatic', or 'any' (default: 'any')
-            
-        Returns
-        -------
-        Path
-            Path to the downloaded subtitle file
-            
-        Raises
-        ------
-        YtDlpError
-            If there's an error downloading subtitles or if the requested language is not available
-        """
-        try:
-            output_path = Path(output_path)
-            
-            # Create parent directory if it doesn't exist
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # First check if the requested language is available
-            available_subtitles = self.list_subtitles(url)
-            
-            # Determine available subtitle sources based on the 'source' parameter
-            sources_to_check = []
-            if source == 'any':
-                sources_to_check = ['manual', 'automatic']
-            else:
-                sources_to_check = [source]
-            
-            # Check if requested language is available in specified sources
-            language_available = False
-            selected_source = None
-            
-            for src in sources_to_check:
-                for sub in available_subtitles.get(src, []):
-                    if sub['language'] == language:
-                        language_available = True
-                        selected_source = src
-                        break
-                if language_available:
-                    break
-            
-            if not language_available:
-                raise YtDlpError(f"Subtitles in language '{language}' are not available")
-            
-            # Create yt-dlp options for subtitle download
-            ydl_opts = {
-                'skip_download': True,
-                'subtitleslangs': [language],
-                'writesubtitles': True,
-                'outtmpl': str(output_path.with_suffix('')),
-                'quiet': True,
-                'no_warnings': True,
-            }
-            
-            # Select source type (auto or regular)
-            if selected_source == 'automatic':
-                ydl_opts['writeautomaticsub'] = True
-            else:
-                ydl_opts['writesubtitles'] = True
-            
-            # Format preference
-            for fmt in formats:
-                ydl_opts[f'subtitlesformat'] = fmt
-                
-                # Try to download with current format
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.download([url])
-                
-                # Check if file was created with current format
-                expected_file = output_path.with_suffix(f'.{language}.{fmt}')
-                if expected_file.exists():
-                    # Rename file to the requested output path if needed
-                    if expected_file != output_path:
-                        shutil.move(expected_file, output_path)
-                    return output_path
-            
-            # If we reach this point, none of the formats were downloaded successfully
-            raise YtDlpError(f"Failed to download subtitles in any of the requested formats: {formats}")
-            
-        except Exception as exc:
-            raise YtDlpError(f"Error downloading subtitles: {exc}") 
+            raise YtDlpError(f"Error listing subtitles: {exc}") 

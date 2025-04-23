@@ -97,7 +97,7 @@ class CaptionService:
         language : str, default 'en'
             Language code (e.g., 'en', 'fr')
         source : str, default 'manual'
-            Source of caption ('manual' or 'automatic')
+            Source of caption ('manual', 'automatic', 'translated', or 'any')
         formats : List[str], default None
             List of preferred formats in order (e.g., ['vtt', 'srt'])
             If None, defaults to ['vtt', 'srt', 'json']
@@ -124,16 +124,6 @@ class CaptionService:
                 self.logger.info(f"Using cached caption for video {video_id}, language {language}")
                 return cached_caption
         
-        # Prepare metadata
-        metadata = CaptionMetadata(
-            video_id=video_id,
-            language_code=language,
-            language_name="Unknown",  # Will be updated after download
-            is_auto_generated=source == "automatic",
-            format="auto",  # Will be updated after download
-            source_url=url
-        )
-        
         # Create a temporary directory for download
         with self._create_temp_dir() as temp_dir:
             temp_file = temp_dir / f"subtitle_{video_id}_{language}"
@@ -151,12 +141,22 @@ class CaptionService:
                 if not subtitle_info:
                     raise CaptionError(f"No subtitles available for video {video_id} in language {language}")
                 
-                # Update metadata
-                metadata.format = subtitle_info.get("ext", "auto")
-                metadata.language_name = subtitle_info.get("language_name", metadata.language_name)
+                # Prepare metadata using the enhanced information from download_subtitle
+                metadata = CaptionMetadata(
+                    video_id=video_id,
+                    language_code=language,
+                    language_name=subtitle_info.get('language_name', 'Unknown'),
+                    is_auto_generated=subtitle_info.get('is_auto_generated', False),
+                    format=subtitle_info.get('ext', 'auto'),
+                    source_url=url,
+                    caption_type=subtitle_info.get('caption_type', source),
+                    has_speaker_identification=subtitle_info.get('has_speaker_id', False),
+                    provider='youtube',
+                    is_default=subtitle_info.get('is_default', False)
+                )
                 
                 # Parse subtitle file
-                downloaded_file = f"{temp_file}.{metadata.format}"
+                downloaded_file = subtitle_info.get('filepath')
                 if not os.path.exists(downloaded_file):
                     raise CaptionError(f"Downloaded subtitle file not found: {downloaded_file}")
                 
@@ -359,4 +359,77 @@ class CaptionService:
             def __exit__(self, exc_type, exc_val, exc_tb):
                 shutil.rmtree(self.path, ignore_errors=True)
         
-        return TempDirContext(temp_dir) 
+        return TempDirContext(temp_dir)
+    
+    def filter_captions_by_type(self, captions_info: Dict[str, List[Dict]], caption_type: str) -> List[Dict]:
+        """Filter available captions by type.
+        
+        Parameters
+        ----------
+        captions_info : Dict[str, List[Dict]]
+            Dictionary with available captions as returned by get_available_captions
+        caption_type : str
+            Type of caption to filter ('manual', 'auto_generated', 'translated', etc.)
+            
+        Returns
+        -------
+        List[Dict]
+            List of captions matching the specified type
+        """
+        result = []
+        
+        # Check in both manual and automatic sections
+        for section in ['manual', 'automatic']:
+            for caption in captions_info.get(section, []):
+                if caption.get('caption_type') == caption_type:
+                    result.append(caption)
+        
+        return result
+    
+    def has_speaker_identification(self, captions_info: Dict[str, List[Dict]]) -> List[Dict]:
+        """Get captions that have speaker identification.
+        
+        Parameters
+        ----------
+        captions_info : Dict[str, List[Dict]]
+            Dictionary with available captions as returned by get_available_captions
+            
+        Returns
+        -------
+        List[Dict]
+            List of captions that have speaker identification
+        """
+        result = []
+        
+        # Check in both manual and automatic sections
+        for section in ['manual', 'automatic']:
+            for caption in captions_info.get(section, []):
+                if caption.get('has_speaker_id', False):
+                    result.append(caption)
+        
+        return result
+    
+    def get_default_caption(self, captions_info: Dict[str, List[Dict]]) -> Optional[Dict]:
+        """Get the default caption track if available.
+        
+        Parameters
+        ----------
+        captions_info : Dict[str, List[Dict]]
+            Dictionary with available captions as returned by get_available_captions
+            
+        Returns
+        -------
+        Optional[Dict]
+            Default caption info or None if no default is set
+        """
+        # Check first in manual captions (preferred)
+        for caption in captions_info.get('manual', []):
+            if caption.get('is_default', False):
+                return caption
+        
+        # Then check automatic captions
+        for caption in captions_info.get('automatic', []):
+            if caption.get('is_default', False):
+                return caption
+        
+        return None 

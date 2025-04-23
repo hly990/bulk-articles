@@ -224,7 +224,9 @@ class VttParser(CaptionParser):
     
     # Regular expressions for cleaning VTT text
     HTML_TAG_PATTERN = re.compile(r'<[^>]+>')
-    VOICE_TAG_PATTERN = re.compile(r'<v\s+[^>]+>(.*?)</v>')
+    VOICE_TAG_PATTERN = re.compile(r'<v\s+([^>]+)>(.*?)</v>')
+    SPEAKER_PATTERN = re.compile(r'\[?([a-zA-Z]*\s*(?:speaker|SPEAKER)[\s0-9]*)\]?[:.\s]*(.*)')
+    BRACKET_PATTERN = re.compile(r'\[(.*?)\](.*)')
     
     def __init__(self, logger: Optional[logging.Logger] = None):
         """Initialize the VTT parser.
@@ -235,6 +237,7 @@ class VttParser(CaptionParser):
             Logger for recording parsing issues
         """
         self.logger = logger or logging.getLogger(__name__)
+        self._has_detected_speakers = False
     
     @classmethod
     def detect_format(cls, content: str) -> bool:
@@ -277,6 +280,46 @@ class VttParser(CaptionParser):
         hours, minutes, seconds, milliseconds = map(int, match.groups())
         return hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
     
+    def _extract_speaker(self, text: str) -> tuple[str, str]:
+        """Extract speaker information from text if present.
+        
+        Parameters
+        ----------
+        text : str
+            Text that may contain speaker information
+            
+        Returns
+        -------
+        tuple[str, str]
+            Tuple of (speaker, cleaned_text) - speaker is empty if none found
+        """
+        # Check for voice tags: <v Speaker Name>Text</v>
+        voice_match = self.VOICE_TAG_PATTERN.search(text)
+        if voice_match:
+            self._has_detected_speakers = True
+            speaker = voice_match.group(1).strip()
+            return speaker, voice_match.group(2).strip()
+        
+        # Check for format: [SPEAKER 1]: Text
+        speaker_match = self.SPEAKER_PATTERN.match(text.strip())
+        if speaker_match:
+            self._has_detected_speakers = True
+            speaker = speaker_match.group(1).strip()
+            return speaker, speaker_match.group(2).strip()
+            
+        # Check for format: [Music] Text or [Applause] Text
+        bracket_match = self.BRACKET_PATTERN.match(text.strip())
+        if bracket_match:
+            content = bracket_match.group(1).strip().lower()
+            if content in ('music', 'applause', 'laughter', 'sound'):
+                # This is a sound effect, not a speaker
+                return '', text
+            # This might be a speaker designation
+            self._has_detected_speakers = True
+            return bracket_match.group(1).strip(), bracket_match.group(2).strip()
+        
+        return '', text
+    
     def _clean_text(self, text: str) -> str:
         """Clean WebVTT text by removing HTML tags and other format-specific elements.
         
@@ -290,22 +333,37 @@ class VttParser(CaptionParser):
         str
             Cleaned text
         """
-        # Extract text from voice tags
-        text = self.VOICE_TAG_PATTERN.sub(r'\1', text)
+        # Remove voice tags but preserve speaker information
+        speaker_text_pairs = []
+        current_text = text
         
-        # Remove other HTML tags
-        text = self.HTML_TAG_PATTERN.sub('', text)
+        # Process each line for potential speaker information
+        for line in text.split('\n'):
+            speaker, cleaned_line = self._extract_speaker(line)
+            if speaker:
+                speaker_text_pairs.append((speaker, cleaned_line))
+            else:
+                # No speaker found, keep the line as is
+                speaker_text_pairs.append(('', self.HTML_TAG_PATTERN.sub('', line)))
+        
+        # Reconstruct text with speaker prefixes where applicable
+        result_lines = []
+        for speaker, line_text in speaker_text_pairs:
+            if speaker and line_text:
+                result_lines.append(f"{speaker}: {line_text}")
+            elif line_text:
+                result_lines.append(line_text)
         
         # Remove positioning information (lines starting with align: etc.)
-        lines = []
-        for line in text.split('\n'):
+        filtered_lines = []
+        for line in result_lines:
             if not line.strip() or ':' in line and line.split(':', 1)[0].strip().lower() in (
                 'align', 'position', 'size', 'vertical', 'line', 'region'
             ):
                 continue
-            lines.append(line)
+            filtered_lines.append(line)
         
-        return '\n'.join(lines).strip()
+        return '\n'.join(filtered_lines).strip()
     
     def parse(
         self, 
@@ -333,6 +391,9 @@ class VttParser(CaptionParser):
         """
         if not content.strip():
             raise ParserError("Empty WebVTT content")
+        
+        # Reset speaker detection flag
+        self._has_detected_speakers = False
         
         # Skip WebVTT header
         if 'WEBVTT' in content[:100]:
@@ -369,6 +430,10 @@ class VttParser(CaptionParser):
         if not caption.lines:
             raise ParserError("No valid caption lines found in WebVTT content")
         
+        # Update metadata with speaker identification flag
+        if self._has_detected_speakers:
+            metadata.has_speaker_identification = True
+            
         return caption
 
 
