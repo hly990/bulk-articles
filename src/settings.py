@@ -44,7 +44,11 @@ class Settings(QObject):
             
             # Panel sizes
             "article_list_width": 300,
-            "editor_width": 600
+            "editor_width": 600,
+            
+            # DeepSeek AI
+            "deepseek_api_key": "",  # Stored encrypted via OS‑managed keychain in future
+            "deepseek_base_url": "https://api.deepseek.com/v1",
         }
         
         # Current settings (loaded from QSettings or defaults)

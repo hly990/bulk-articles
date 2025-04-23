@@ -42,6 +42,24 @@ except ModuleNotFoundError:
     CacheConfig = None  # type: ignore
     CacheKey = None  # type: ignore
 
+# Import DeepSeek service
+try:
+    from .deepseek_service import (
+        DeepSeekService,
+        DeepSeekError,
+        AuthenticationError,
+        RateLimitError,
+        APIConnectionError,
+        APIResponseError,
+    )
+except ModuleNotFoundError:
+    DeepSeekService = None  # type: ignore
+    DeepSeekError = RuntimeError  # type: ignore
+    AuthenticationError = RuntimeError  # type: ignore
+    RateLimitError = RuntimeError  # type: ignore
+    APIConnectionError = RuntimeError  # type: ignore
+    APIResponseError = RuntimeError  # type: ignore
+
 __all__ = [
     "YtDlpWrapper",
     "YtDlpError",
@@ -57,6 +75,13 @@ __all__ = [
     "CaptionCache",
     "CacheConfig",
     "CacheKey",
+    # DeepSeek
+    "DeepSeekService",
+    "DeepSeekError",
+    "AuthenticationError",
+    "RateLimitError",
+    "APIConnectionError",
+    "APIResponseError",
 ]
 
 try:

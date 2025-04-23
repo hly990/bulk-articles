@@ -1,6 +1,6 @@
 # Task ID: 3
 # Title: Develop YouTube Captions Extraction Service
-# Status: pending
+# Status: done
 # Dependencies: 2
 # Priority: high
 # Description: Create a service to extract and parse captions/subtitles from YouTube videos.
@@ -130,7 +130,7 @@ Testing approach:
 - Verify preview formatting and length constraints
 - Test preview generation for different languages
 
-## 8. Finalize API and documentation [pending]
+## 8. Finalize API and documentation [done]
 ### Dependencies: 3.2, 3.3, 3.4, 3.5, 3.6, 3.7
 ### Description: Complete the service API and create comprehensive documentation
 ### Details:

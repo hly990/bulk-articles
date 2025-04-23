@@ -58,6 +58,8 @@ class SettingsDialog(QDialog):
             "medium_api_key": self.config.get("api", "medium_api_key", ""),
             "wordpress_api_key": self.config.get("api", "wordpress_api_key", ""),
             "deepl_api_key": self.config.get("api", "deepl_api_key", ""),
+            "deepseek_api_key": self.config.get("api", "deepseek_api_key", ""),
+            "deepseek_base_url": self.config.get("api", "deepseek_base_url", "https://api.deepseek.com/v1"),
             
             # UI settings
             "font_family": self.config.get("ui", "font_family", "Segoe UI"),
@@ -279,6 +281,15 @@ class SettingsDialog(QDialog):
         self.deepl_api_key_edit = QLineEdit()
         self.deepl_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         layout.addRow("DeepL API Key:", self.deepl_api_key_edit)
+        
+        # DeepSeek API key
+        self.deepseek_api_key_edit = QLineEdit()
+        self.deepseek_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addRow("DeepSeek API Key:", self.deepseek_api_key_edit)
+        
+        # DeepSeek Base URL
+        self.deepseek_base_url_edit = QLineEdit()
+        layout.addRow("DeepSeek Base URL:", self.deepseek_base_url_edit)
     
     def _browse_save_path(self):
         """Browse for save path"""
@@ -336,6 +347,8 @@ class SettingsDialog(QDialog):
         self.medium_api_key_edit.setText(self.current_settings.get("medium_api_key", ""))
         self.wordpress_api_key_edit.setText(self.current_settings.get("wordpress_api_key", ""))
         self.deepl_api_key_edit.setText(self.current_settings.get("deepl_api_key", ""))
+        self.deepseek_api_key_edit.setText(self.current_settings.get("deepseek_api_key", ""))
+        self.deepseek_base_url_edit.setText(self.current_settings.get("deepseek_base_url", "https://api.deepseek.com/v1"))
     
     def get_settings(self):
         """
@@ -381,7 +394,9 @@ class SettingsDialog(QDialog):
             "openai_api_key": self.openai_api_key_edit.text(),
             "medium_api_key": self.medium_api_key_edit.text(),
             "wordpress_api_key": self.wordpress_api_key_edit.text(),
-            "deepl_api_key": self.deepl_api_key_edit.text()
+            "deepl_api_key": self.deepl_api_key_edit.text(),
+            "deepseek_api_key": self.deepseek_api_key_edit.text(),
+            "deepseek_base_url": self.deepseek_base_url_edit.text()
         }
         
         return settings
@@ -430,6 +445,8 @@ class SettingsDialog(QDialog):
         self.config.set("api", "medium_api_key", settings["medium_api_key"])
         self.config.set("api", "wordpress_api_key", settings["wordpress_api_key"])
         self.config.set("api", "deepl_api_key", settings["deepl_api_key"])
+        self.config.set("api", "deepseek_api_key", settings["deepseek_api_key"])
+        self.config.set("api", "deepseek_base_url", settings["deepseek_base_url"])
         
         # Save config
         self.config.save()
@@ -462,7 +479,9 @@ class SettingsDialog(QDialog):
                 "openai_api_key": "",
                 "medium_api_key": "",
                 "wordpress_api_key": "",
-                "deepl_api_key": ""
+                "deepl_api_key": "",
+                "deepseek_api_key": "",
+                "deepseek_base_url": "https://api.deepseek.com/v1"
             }
         
         # Reload settings into UI
