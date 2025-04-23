@@ -578,6 +578,112 @@ class YtDlpWrapper:
         except Exception as exc:
             raise YtDlpError(f"Error downloading video: {exc}")
 
+    def download_audio(
+        self, 
+        url: str, 
+        output_template: Union[str, Path],
+        audio_format: str = "mp3",
+        audio_quality: str = "192k",
+        extra_options: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Download audio from a YouTube video.
+        
+        Parameters
+        ----------
+        url : str
+            YouTube video URL or ID
+        output_template : str | Path
+            Output template for the audio file (e.g., "/path/to/%(id)s.%(ext)s")
+        audio_format : str, default "mp3"
+            Format to convert audio to: "mp3", "m4a", "aac", "wav", etc.
+        audio_quality : str, default "192k"
+            Audio quality (bitrate). Options depend on the format.
+            For mp3: "320k", "256k", "192k", "128k", "96k", etc.
+        extra_options : Dict[str, Any] | None
+            Additional yt-dlp options
+            
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary with download information:
+            {
+                "filepath": str,
+                "filename": str,
+                "format_id": str,
+                "ext": str,
+                "video_id": str
+            }
+            
+        Raises
+        ------
+        YtDlpError
+            If there's an error downloading the audio
+        """
+        try:
+            self._ensure_library_available()
+            
+            # Create parent directory if needed
+            output_dir = Path(output_template).parent
+            output_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Setup options for audio-only download
+            ydl_opts = {
+                "outtmpl": str(output_template),
+                "format": "bestaudio/best",
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": audio_format,
+                    "preferredquality": audio_quality,
+                }],
+                # Only download audio
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+            }
+            
+            # Merge any extra options
+            if extra_options:
+                ydl_opts.update(extra_options)
+            
+            # Download audio
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                
+                if not info:
+                    raise YtDlpError(f"Failed to extract info from {url}")
+                
+                # Get actual info dict for individual videos in a playlist
+                if 'entries' in info:
+                    # Only first video in playlist if somehow playlist download occurred
+                    info = info['entries'][0]
+                
+                # Determine filepath
+                filename = ydl.prepare_filename(info)
+                # Account for the postprocessor changing the extension
+                audio_path = Path(filename).with_suffix(f".{audio_format}")
+                
+                if not audio_path.exists():
+                    self.logger.warning(f"Audio file not found at expected path: {audio_path}")
+                    # Try to find any audio file matching the pattern (excluding extension)
+                    base_path = Path(filename).with_suffix('')
+                    audio_files = list(base_path.parent.glob(f"{base_path.name}.*"))
+                    if audio_files:
+                        audio_path = audio_files[0]
+                    else:
+                        raise YtDlpError(f"Audio file not found after download")
+                
+                # Return information about the download
+                return {
+                    "filepath": str(audio_path),
+                    "filename": audio_path.name,
+                    "format_id": info.get("format_id", "unknown"),
+                    "ext": audio_path.suffix.lstrip('.'),
+                    "video_id": info.get("id", "unknown")
+                }
+                
+        except Exception as exc:
+            raise YtDlpError(f"Error downloading audio: {exc}")
+
     # ------------------------------------------------------------------
     # Video processing methods
     # ------------------------------------------------------------------

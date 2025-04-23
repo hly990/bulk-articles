@@ -154,6 +154,10 @@ class CaptionCache:
             self.misses += 1
             return None
             
+        # Handle "auto_generated" vs "automatic" source type conversion for backward compatibility
+        if source == "auto_generated":
+            source = "automatic"
+            
         key = CacheKey.generate(video_id, language, source, **kwargs)
         filepath = self.cache_dir / f"{key}.{self.config.format}"
         
@@ -225,6 +229,10 @@ class CaptionCache:
         if source is None:
             source = getattr(caption.metadata, 'caption_type', 'unknown')
         
+        # Handle "auto_generated" vs "automatic" source type conversion for backward compatibility
+        if source == "auto_generated":
+            source = "automatic"
+        
         # Get video_id and language_code from caption metadata
         video_id = caption.metadata.video_id
         language = caption.metadata.language_code
@@ -275,6 +283,10 @@ class CaptionCache:
         """
         if not self.config.enabled:
             return 0
+            
+        # Handle "auto_generated" vs "automatic" source type conversion for backward compatibility
+        if source == "auto_generated":
+            source = "automatic"
             
         pattern = f"{video_id}"
         if language is not None:
