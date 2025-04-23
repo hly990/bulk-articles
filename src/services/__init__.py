@@ -60,6 +60,22 @@ except ModuleNotFoundError:
     APIConnectionError = RuntimeError  # type: ignore
     APIResponseError = RuntimeError  # type: ignore
 
+# Import Summarizer service
+try:
+    from .summarizer_service import (
+        SummarizerService,
+        SummarizerConfig,
+        SummarizerResult,
+        SummarizationStatus,
+        GenerationMetrics,
+    )
+except ModuleNotFoundError:
+    SummarizerService = None  # type: ignore
+    SummarizerConfig = None  # type: ignore 
+    SummarizerResult = None  # type: ignore
+    SummarizationStatus = None  # type: ignore
+    GenerationMetrics = None  # type: ignore
+
 __all__ = [
     "YtDlpWrapper",
     "YtDlpError",
@@ -82,6 +98,12 @@ __all__ = [
     "RateLimitError",
     "APIConnectionError",
     "APIResponseError",
+    # Summarizer
+    "SummarizerService",
+    "SummarizerConfig",
+    "SummarizerResult",
+    "SummarizationStatus",
+    "GenerationMetrics",
 ]
 
 try:
