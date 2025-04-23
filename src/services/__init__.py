@@ -78,11 +78,12 @@ except ModuleNotFoundError:
 
 # Import new services
 from .video_downloader import VideoDownloader
-from .caption_fallback import CaptionFallback
-from .subtitle_converter import (
-    SubtitleConverter, WebVTTConverter, SRTConverter, LRCConverter
+from .caption_fallback import (
+    FallbackStrategy, WhisperFallbackStrategy, 
+    ExternalWhisperFallbackStrategy, FallbackChain
 )
-from .youtube_utils import YouTubeUtils, VideoInfo
+from .subtitle_converter import SubtitleConverter
+from .youtube_utils import YouTubeValidator, VideoMetadata, MetadataExtractor
 from .transcript_segmenter import (
     TranscriptSegmenter, Segment, SegmentManager, 
     TokenizerInterface, SimpleTokenizer
@@ -93,6 +94,10 @@ from .prompt_templates import (
 )
 from .article_structure_generator import (
     ArticleStructureGenerator, ArticleFormatConfig
+)
+from .token_usage_tracker import (
+    TokenUsageTracker, TokenUsageStats, TokenOptimizer,
+    UsagePeriod, UsageRecord, TokenBudgetExceededError
 )
 
 __all__ = [
@@ -125,13 +130,14 @@ __all__ = [
     "GenerationMetrics",
     # New services
     "VideoDownloader",
-    "CaptionFallback",
+    "FallbackStrategy",
+    "WhisperFallbackStrategy",
+    "ExternalWhisperFallbackStrategy",
+    "FallbackChain",
     "SubtitleConverter",
-    "WebVTTConverter",
-    "SRTConverter",
-    "LRCConverter",
-    "YouTubeUtils",
-    "VideoInfo",
+    "YouTubeValidator",
+    "VideoMetadata",
+    "MetadataExtractor",
     "TranscriptSegmenter",
     "Segment",
     "SegmentManager",
@@ -142,7 +148,14 @@ __all__ = [
     "MEDIUM_TEMPLATES",
     "TONE_SPECIFIC_GUIDANCE",
     "ArticleStructureGenerator",
-    "ArticleFormatConfig"
+    "ArticleFormatConfig",
+    # Token usage tracker
+    "TokenUsageTracker",
+    "TokenUsageStats",
+    "TokenOptimizer",
+    "UsagePeriod",
+    "UsageRecord",
+    "TokenBudgetExceededError"
 ]
 
 try:
