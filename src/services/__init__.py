@@ -34,38 +34,13 @@ try:
 except ModuleNotFoundError:
     CaptionService = None  # type: ignore
 
-__all__ = [
-    "YtDlpWrapper",
-    "YtDlpError",
-    "Caption",
-    "CaptionLine",
-    "CaptionMetadata",
-    "CaptionError",
-    "ParserFactory",
-    "ParserError",
-    "SrtParser",
-    "VttParser",
-    "CaptionService",
-]
-
+# Import caption cache
 try:
-    __version__ = metadata.version("yt-dlp")
-except metadata.PackageNotFoundError:  # type: ignore[attr-defined]
-    __version__ = "not-installed" 
-# Import subtitle parser
-try:
-    from .subtitle_parser import ParserFactory, ParserError, SrtParser, VttParser
+    from .caption_cache import CaptionCache, CacheConfig, CacheKey
 except ModuleNotFoundError:
-    ParserFactory = None  # type: ignore
-    ParserError = RuntimeError  # type: ignore
-    SrtParser = None  # type: ignore
-    VttParser = None  # type: ignore
-
-# Import caption service
-try:
-    from .caption_service import CaptionService
-except ModuleNotFoundError:
-    CaptionService = None  # type: ignore
+    CaptionCache = None  # type: ignore
+    CacheConfig = None  # type: ignore
+    CacheKey = None  # type: ignore
 
 __all__ = [
     "YtDlpWrapper",
@@ -79,6 +54,9 @@ __all__ = [
     "SrtParser",
     "VttParser",
     "CaptionService",
+    "CaptionCache",
+    "CacheConfig",
+    "CacheKey",
 ]
 
 try:

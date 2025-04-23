@@ -22,6 +22,7 @@ from .media_storage import MediaStorage
 from .youtube_utils import YouTubeValidator
 from .caption_model import Caption, CaptionLine, CaptionMetadata, CaptionError
 from .subtitle_parser import ParserFactory, ParserError
+from .caption_cache import CaptionCache, CacheConfig
 
 __all__ = [
     "CaptionService",
@@ -35,6 +36,7 @@ class CaptionService:
         self,
         yt_dlp_wrapper,
         cache_dir: Optional[Union[str, Path]] = None,
+        cache_config: Optional[CacheConfig] = None,
         logger: Optional[logging.Logger] = None
     ):
         """Initialize the caption service.
@@ -45,16 +47,26 @@ class CaptionService:
             Instance of YtDlpWrapper for YouTube operations
         cache_dir : Optional[Union[str, Path]], default None
             Directory for caching captions
+        cache_config : Optional[CacheConfig], default None
+            Configuration for the caption cache
         logger : Optional[logging.Logger], default None
             Logger for recording issues
         """
         self.yt_dlp = yt_dlp_wrapper
-        self.cache_dir = Path(cache_dir) if cache_dir else None
         self.logger = logger or logging.getLogger(__name__)
         
-        # Create cache directory if it doesn't exist
-        if self.cache_dir:
-            self.cache_dir.mkdir(parents=True, exist_ok=True)
+        # Set up caching
+        if cache_dir:
+            self.cache = CaptionCache(
+                cache_dir=Path(cache_dir),
+                config=cache_config,
+                logger=self.logger
+            )
+            self.cache_enabled = True
+        else:
+            # Create disabled cache if no cache directory provided
+            self.cache = None
+            self.cache_enabled = False
     
     def get_available_captions(self, url: str) -> Dict[str, List[Dict]]:
         """Get available captions for a YouTube video.
@@ -86,7 +98,8 @@ class CaptionService:
         language: str = "en",
         source: str = "manual",
         formats: List[str] = None,
-        use_cache: bool = True
+        use_cache: bool = True,
+        cache_kwargs: Optional[Dict[str, Any]] = None
     ) -> Caption:
         """Get caption for a YouTube video.
         
@@ -103,6 +116,8 @@ class CaptionService:
             If None, defaults to ['vtt', 'srt', 'json']
         use_cache : bool, default True
             Whether to use cached captions if available
+        cache_kwargs : Optional[Dict[str, Any]], default None
+            Additional parameters for the cache key
             
         Returns
         -------
@@ -116,10 +131,17 @@ class CaptionService:
         """
         formats = formats or ["vtt", "srt", "json"]
         video_id = self._extract_video_id(url)
+        cache_kwargs = cache_kwargs or {}
         
         # Try to get from cache first
-        if use_cache and self.cache_dir:
-            cached_caption = self._get_cached_caption(video_id, language, source)
+        if use_cache and self.cache_enabled and self.cache:
+            cached_caption = self.cache.get(
+                video_id=video_id,
+                language=language,
+                source=source,
+                **cache_kwargs
+            )
+            
             if cached_caption:
                 self.logger.info(f"Using cached caption for video {video_id}, language {language}")
                 return cached_caption
@@ -166,8 +188,12 @@ class CaptionService:
                 caption = self._parse_subtitle_file(content, metadata)
                 
                 # Cache the caption
-                if self.cache_dir:
-                    self._cache_caption(caption)
+                if self.cache_enabled and self.cache and use_cache:
+                    self.cache.store(
+                        caption=caption,
+                        source=source,
+                        **cache_kwargs
+                    )
                 
                 return caption
                 
@@ -192,22 +218,22 @@ class CaptionService:
         CaptionError
             If video ID cannot be extracted
         """
-        # Check if it's already a video ID (11 chars)
-        if re.match(r'^[a-zA-Z0-9_-]{11}$', url):
+        # Check if it's already a video ID
+        if not url.startswith(('http://', 'https://', 'www.')):
             return url
         
         # Try to extract from YouTube URL
         patterns = [
-            r'youtu\.be/([a-zA-Z0-9_-]{11})',                # youtu.be/{video_id}
-            r'youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})',    # youtube.com/watch?v={video_id}
-            r'youtube\.com/embed/([a-zA-Z0-9_-]{11})'        # youtube.com/embed/{video_id}
+            r'youtu\.be/([^&?/]+)',                # youtu.be/{video_id}
+            r'youtube\.com/watch\?v=([^&?/]+)',    # youtube.com/watch?v={video_id}
+            r'youtube\.com/embed/([^&?/]+)'        # youtube.com/embed/{video_id}
         ]
         
         for pattern in patterns:
             match = re.search(pattern, url)
             if match:
                 return match.group(1)
-        
+                
         raise CaptionError(f"Could not extract video ID from URL: {url}")
     
     def _parse_subtitle_file(self, content: str, metadata: CaptionMetadata) -> Caption:
@@ -248,70 +274,59 @@ class CaptionService:
         except Exception as exc:
             raise CaptionError(f"Unexpected error parsing subtitle file: {exc}")
     
-    def _get_cached_caption(self, video_id: str, language: str, source: str) -> Optional[Caption]:
-        """Get caption from cache if available.
+    def clear_cache(self) -> bool:
+        """Clear the caption cache.
+        
+        Returns
+        -------
+        bool
+            True if clearing was successful, False otherwise
+        """
+        if self.cache_enabled and self.cache:
+            return self.cache.clear()
+        return False
+    
+    def invalidate_cache(
+        self,
+        video_id: str,
+        language: str = None,
+        source: str = None
+    ) -> int:
+        """Invalidate cache entries for a specific video.
         
         Parameters
         ----------
         video_id : str
             YouTube video ID
-        language : str
-            Language code
-        source : str
-            Source of caption ('manual' or 'automatic')
+        language : str, optional
+            Language code (if None, all languages are invalidated)
+        source : str, optional
+            Caption source (if None, all sources are invalidated)
             
         Returns
         -------
-        Optional[Caption]
-            Caption from cache, or None if not available
+        int
+            Number of cache entries invalidated
         """
-        if not self.cache_dir:
-            return None
-        
-        cache_file = self.cache_dir / f"{video_id}_{language}_{source}.json"
-        
-        if not cache_file.exists():
-            return None
-        
-        try:
-            with open(cache_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            
-            return Caption.from_dict(data)
-        except Exception as exc:
-            self.logger.warning(f"Failed to load cached caption: {exc}")
-            return None
+        if self.cache_enabled and self.cache:
+            return self.cache.invalidate(
+                video_id=video_id,
+                language=language,
+                source=source
+            )
+        return 0
     
-    def _cache_caption(self, caption: Caption) -> bool:
-        """Cache a caption for future use.
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Get cache statistics.
         
-        Parameters
-        ----------
-        caption : Caption
-            Caption to cache
-            
         Returns
         -------
-        bool
-            True if caching was successful, False otherwise
+        Dict[str, Any]
+            Dictionary of cache statistics or empty dict if caching is disabled
         """
-        if not self.cache_dir:
-            return False
-        
-        metadata = caption.metadata
-        # Determine source based on is_auto_generated flag
-        source = "automatic" if metadata.is_auto_generated else "manual"
-        cache_file = self.cache_dir / f"{metadata.video_id}_{metadata.language_code}_{source}.json"
-        
-        try:
-            with open(cache_file, "w", encoding="utf-8") as f:
-                json.dump(caption.to_dict(), f, ensure_ascii=False, indent=2)
-            
-            self.logger.info(f"Caption cached to {cache_file}")
-            return True
-        except Exception as exc:
-            self.logger.warning(f"Failed to cache caption: {exc}")
-            return False
+        if self.cache_enabled and self.cache:
+            return self.cache.get_stats()
+        return {}
     
     def get_caption_preview(self, caption: Caption, max_lines: int = 5) -> str:
         """Get a preview of the caption text.
