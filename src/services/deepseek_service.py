@@ -23,6 +23,11 @@ Updates in task 4.7:
 * Added token counting from API responses
 * Added support for tracking usage statistics
 
+Updates in task 4.8:
+* Refactored to inherit from LLMServiceBase
+* Aligned error classes with base LLM service errors
+* Ensured compatibility with other LLM services for fallback
+
 A full UI to configure the credentials will be added in a later sub‑task. For
 now, callers may pass the parameters explicitly or rely on environment
 variables:
@@ -43,6 +48,16 @@ from typing import Any, Dict, List, MutableMapping, Optional, Tuple, Union, cast
 import requests
 from requests import Response
 
+# Import the base LLM service and token tracker
+from .llm_service_base import (
+    LLMServiceBase,
+    LLMServiceError,
+    LLMAuthenticationError,
+    LLMRateLimitError,
+    LLMConnectionError,
+    LLMResponseError,
+)
+
 # Import the token tracker, but make it optional in case it's not available yet
 try:
     from .token_usage_tracker import TokenUsageTracker
@@ -60,27 +75,27 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Error hierarchy
+# Error hierarchy - keeping for backward compatibility
 # ---------------------------------------------------------------------------
 
 
-class DeepSeekError(RuntimeError):
+class DeepSeekError(LLMServiceError):
     """Base error raised for any DeepSeek‑related issues."""
 
 
-class AuthenticationError(DeepSeekError):
+class AuthenticationError(DeepSeekError, LLMAuthenticationError):
     """Invalid / missing credentials."""
 
 
-class RateLimitError(DeepSeekError):
+class RateLimitError(DeepSeekError, LLMRateLimitError):
     """HTTP 429 – too many requests."""
 
 
-class APIConnectionError(DeepSeekError):
+class APIConnectionError(DeepSeekError, LLMConnectionError):
     """Network‑level issues (timeouts, DNS, TLS …)"""
 
 
-class APIResponseError(DeepSeekError):
+class APIResponseError(DeepSeekError, LLMResponseError):
     """Unexpected / malformed API response."""
 
 
@@ -109,7 +124,7 @@ class _CacheKey:
 # ---------------------------------------------------------------------------
 
 
-class DeepSeekService:
+class DeepSeekService(LLMServiceBase):
     """Lightweight wrapper around the DeepSeek text AI API."""
 
     # Default endpoints relative to *base_url*
@@ -131,6 +146,28 @@ class DeepSeekService:
         session: Optional[requests.Session] = None,
         token_tracker: Optional[TokenUsageTracker] = None,
     ) -> None:
+        """Initialize the DeepSeek service.
+        
+        Parameters
+        ----------
+        api_key : Optional[str]
+            DeepSeek API key. If not provided, will look for DEEPSEEK_API_KEY environment variable.
+        base_url : Optional[str]
+            DeepSeek API base URL. If not provided, will use default or DEEPSEEK_BASE_URL env var.
+        timeout : int
+            Request timeout in seconds.
+        cache_enabled : bool
+            Whether to enable request caching.
+        logger : Optional[logging.Logger]
+            Logger to use. If not provided, will create one based on class name.
+        session : Optional[requests.Session]
+            Request session to use. If not provided, will create a new one.
+        token_tracker : Optional[TokenUsageTracker]
+            Token usage tracker for monitoring API usage.
+        """
+        # Call parent initializer
+        super().__init__(logger=logger, token_tracker=token_tracker)
+        
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         if not self.api_key:
             raise AuthenticationError(
@@ -141,13 +178,9 @@ class DeepSeekService:
                           "https://api.deepseek.com/v1").rstrip("/")
         self.timeout = timeout
         self.cache_enabled = cache_enabled
-        self.logger = logger or logging.getLogger(__name__)
         self._session = session or requests.Session()
         self._lock = threading.Lock()  # protect cache in multi‑threaded env
         self._cache: MutableMapping[_CacheKey, Dict[str, Any]] = {}
-        
-        # Add token tracker for usage tracking
-        self.token_tracker = token_tracker
 
         # Pre‑configure headers – can be overridden per‑request.
         self._session.headers.update(
@@ -371,4 +404,22 @@ class DeepSeekService:
             # This is very approximate and should be replaced with a proper tokenizer
             count = max(1, len(text) // 4)
             
-        return {"prompt_tokens": count} 
+        return {"prompt_tokens": count}
+
+    def is_available(self) -> bool:
+        """Check if the DeepSeek API is available.
+        
+        Returns
+        -------
+        bool
+            True if the API is available, False otherwise.
+        """
+        try:
+            # Use a minimal API call to check connectivity
+            payload = {"prompt": "test", "max_tokens": 1, "model": "deepseek-chat-6.7b"}
+            url = f"{self.base_url}{self.COMPLETION_PATH}"
+            response = self._session.post(url, json=payload, timeout=5)  # Short timeout for fast check
+            return response.status_code == 200
+        except Exception as e:
+            self.logger.warning(f"DeepSeek API unavailable: {e}")
+            return False 

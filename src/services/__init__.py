@@ -42,6 +42,24 @@ except ModuleNotFoundError:
     CacheConfig = None  # type: ignore
     CacheKey = None  # type: ignore
 
+# Import LLM service base
+try:
+    from .llm_service_base import (
+        LLMServiceBase,
+        LLMServiceError,
+        LLMAuthenticationError,
+        LLMRateLimitError,
+        LLMConnectionError,
+        LLMResponseError,
+    )
+except ModuleNotFoundError:
+    LLMServiceBase = None  # type: ignore
+    LLMServiceError = RuntimeError  # type: ignore
+    LLMAuthenticationError = RuntimeError  # type: ignore
+    LLMRateLimitError = RuntimeError  # type: ignore
+    LLMConnectionError = RuntimeError  # type: ignore
+    LLMResponseError = RuntimeError  # type: ignore
+
 # Import DeepSeek service
 try:
     from .deepseek_service import (
@@ -59,6 +77,34 @@ except ModuleNotFoundError:
     RateLimitError = RuntimeError  # type: ignore
     APIConnectionError = RuntimeError  # type: ignore
     APIResponseError = RuntimeError  # type: ignore
+
+# Import Local model service
+try:
+    from .local_model_service import (
+        LocalModelService,
+        LocalModelConfig,
+        LocalModelError,
+        ModelNotFoundError,
+        ModelDownloadError,
+        ModelLoadError,
+    )
+except ModuleNotFoundError:
+    LocalModelService = None  # type: ignore
+    LocalModelConfig = None  # type: ignore
+    LocalModelError = RuntimeError  # type: ignore
+    ModelNotFoundError = RuntimeError  # type: ignore
+    ModelDownloadError = RuntimeError  # type: ignore
+    ModelLoadError = RuntimeError  # type: ignore
+
+# Import Fallback model service
+try:
+    from .fallback_model_service import (
+        FallbackModelService,
+        FallbackMode,
+    )
+except ModuleNotFoundError:
+    FallbackModelService = None  # type: ignore
+    FallbackMode = None  # type: ignore
 
 # Import Summarizer service
 try:
@@ -115,6 +161,13 @@ __all__ = [
     "CaptionCache",
     "CacheConfig",
     "CacheKey",
+    # LLM Service Base
+    "LLMServiceBase",
+    "LLMServiceError",
+    "LLMAuthenticationError",
+    "LLMRateLimitError", 
+    "LLMConnectionError",
+    "LLMResponseError",
     # DeepSeek
     "DeepSeekService",
     "DeepSeekError",
@@ -122,6 +175,16 @@ __all__ = [
     "RateLimitError",
     "APIConnectionError",
     "APIResponseError",
+    # Local Model Service
+    "LocalModelService",
+    "LocalModelConfig",
+    "LocalModelError",
+    "ModelNotFoundError",
+    "ModelDownloadError",
+    "ModelLoadError",
+    # Fallback Model Service
+    "FallbackModelService",
+    "FallbackMode",
     # Summarizer
     "SummarizerService",
     "SummarizerConfig",
