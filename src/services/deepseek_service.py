@@ -18,6 +18,11 @@ The goals for the first iteration are:
 * Surface detailed *logging* for all outbound requests & responses (truncated
   to a safe length).
 
+Updates in task 4.7:
+* Added integration with TokenUsageTracker to monitor and optimize token usage
+* Added token counting from API responses
+* Added support for tracking usage statistics
+
 A full UI to configure the credentials will be added in a later sub‑task. For
 now, callers may pass the parameters explicitly or rely on environment
 variables:
@@ -32,10 +37,17 @@ import json
 import logging
 import os
 import threading
+import uuid
 from typing import Any, Dict, List, MutableMapping, Optional, Tuple, Union, cast
 
 import requests
 from requests import Response
+
+# Import the token tracker, but make it optional in case it's not available yet
+try:
+    from .token_usage_tracker import TokenUsageTracker
+except ImportError:
+    TokenUsageTracker = None  # type: ignore
 
 __all__ = [
     "DeepSeekError",
@@ -117,6 +129,7 @@ class DeepSeekService:
         cache_enabled: bool = True,
         logger: Optional[logging.Logger] = None,
         session: Optional[requests.Session] = None,
+        token_tracker: Optional[TokenUsageTracker] = None,
     ) -> None:
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         if not self.api_key:
@@ -132,6 +145,9 @@ class DeepSeekService:
         self._session = session or requests.Session()
         self._lock = threading.Lock()  # protect cache in multi‑threaded env
         self._cache: MutableMapping[_CacheKey, Dict[str, Any]] = {}
+        
+        # Add token tracker for usage tracking
+        self.token_tracker = token_tracker
 
         # Pre‑configure headers – can be overridden per‑request.
         self._session.headers.update(
@@ -142,8 +158,8 @@ class DeepSeekService:
             }
         )
 
-        self.logger.debug("DeepSeekService initialised (base_url=%s, cache=%s)",
-                          self.base_url, self.cache_enabled)
+        self.logger.debug("DeepSeekService initialised (base_url=%s, cache=%s, token_tracker=%s)",
+                          self.base_url, self.cache_enabled, "enabled" if token_tracker else "disabled")
 
     # ------------------------------------------------------------------
     # Public API helpers
@@ -164,9 +180,32 @@ class DeepSeekService:
         str
             The generated completion text.
         """
+        model = kwargs.get("model", "deepseek-chat-6.7b")
+        request_id = kwargs.pop("request_id", str(uuid.uuid4()))
+        context = kwargs.pop("context", "Text completion")
+        
+        # Estimate prompt tokens for logging/planning
+        prompt_tokens_estimate = len(prompt.split()) 
+        self.logger.debug(f"Estimated prompt tokens: {prompt_tokens_estimate} (request_id={request_id})")
+        
         payload: Dict[str, Any] = {"prompt": prompt, **kwargs}
-        data = self._post(self.COMPLETION_PATH, payload)
+        data = self._post(self.COMPLETION_PATH, payload, request_id=request_id, context=context)
+        
         try:
+            # Extract token counts if available
+            prompt_tokens = data.get("usage", {}).get("prompt_tokens", 0) or prompt_tokens_estimate
+            completion_tokens = data.get("usage", {}).get("completion_tokens", 0)
+            
+            # Track token usage if token tracker is available
+            if self.token_tracker:
+                self.token_tracker.track_usage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    model=model,
+                    request_id=request_id,
+                    context=context
+                )
+                
             return cast(str, data["choices"][0]["text"])
         except (KeyError, IndexError, TypeError):
             raise APIResponseError("Malformed completion response: missing 'choices[0].text'")
@@ -186,9 +225,32 @@ class DeepSeekService:
         str
             The assistant response content.
         """
+        model = kwargs.get("model", "deepseek-chat-6.7b")
+        request_id = kwargs.pop("request_id", str(uuid.uuid4()))
+        context = kwargs.pop("context", "Chat completion")
+        
+        # Estimate prompt tokens for logging/planning
+        prompt_tokens_estimate = sum(len(m.get("content", "").split()) for m in messages)
+        self.logger.debug(f"Estimated prompt tokens: {prompt_tokens_estimate} (request_id={request_id})")
+        
         payload: Dict[str, Any] = {"messages": messages, **kwargs}
-        data = self._post(self.CHAT_PATH, payload)
+        data = self._post(self.CHAT_PATH, payload, request_id=request_id, context=context)
+        
         try:
+            # Extract token counts if available
+            prompt_tokens = data.get("usage", {}).get("prompt_tokens", 0) or prompt_tokens_estimate
+            completion_tokens = data.get("usage", {}).get("completion_tokens", 0)
+            
+            # Track token usage if token tracker is available
+            if self.token_tracker:
+                self.token_tracker.track_usage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    model=model,
+                    request_id=request_id,
+                    context=context
+                )
+                
             return cast(str, data["choices"][0]["message"]["content"])
         except (KeyError, IndexError, TypeError):
             raise APIResponseError("Malformed chat response: missing 'choices[0].message.content'")
@@ -213,7 +275,7 @@ class DeepSeekService:
     # Internal request handler
     # ------------------------------------------------------------------
 
-    def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post(self, path: str, payload: Dict[str, Any], request_id: str = "", context: str = "") -> Dict[str, Any]:
         url = f"{self.base_url}{path}"
         cache_key = _CacheKey.from_payload(path, payload)
 
@@ -240,6 +302,17 @@ class DeepSeekService:
             raise APIResponseError(f"Non‑JSON response from API: {response.text[:200]}") from exc
 
         self._set_cache(cache_key, data)
+        
+        # Log token usage if available in the response
+        usage = data.get("usage", {})
+        if usage:
+            self.logger.info(
+                "API usage: prompt_tokens=%s, completion_tokens=%s, total_tokens=%s",
+                usage.get("prompt_tokens", "unknown"),
+                usage.get("completion_tokens", "unknown"),
+                usage.get("total_tokens", "unknown")
+            )
+
         return data
 
     # ------------------------------------------------------------------
@@ -271,4 +344,31 @@ class DeepSeekService:
             self._cache.clear()
 
     # Convenience alias used by tests
-    reset_cache = clear_cache 
+    reset_cache = clear_cache
+
+    def estimate_token_usage(self, text: str, model: str = "deepseek-chat-6.7b") -> Dict[str, int]:
+        """Estimate the number of tokens for a given text.
+        
+        This is a simple estimation based on average characters per token.
+        For more accurate results, use the token_tracker's estimation.
+        
+        Parameters
+        ----------
+        text: str
+            Text to estimate token count for
+        model: str
+            Model to estimate for (some models use different tokenizers)
+            
+        Returns
+        -------
+        Dict[str, int]
+            Estimated token counts {'prompt_tokens': count}
+        """
+        if self.token_tracker:
+            count = self.token_tracker.estimate_token_count(text)
+        else:
+            # Simple approximation: 4 chars ~= 1 token for English text
+            # This is very approximate and should be replaced with a proper tokenizer
+            count = max(1, len(text) // 4)
+            
+        return {"prompt_tokens": count} 

@@ -1,0 +1,114 @@
+{
+  "records": [
+    {
+      "timestamp": "2025-04-23T17:46:00.234385",
+      "model": "deepseek-chat-6.7b",
+      "prompt_tokens": 198,
+      "completion_tokens": 172,
+      "total_tokens": 370,
+      "estimated_cost": 7.400000000000001e-05,
+      "request_id": "req-1",
+      "context": "Example API call 1",
+      "user_id": ""
+    },
+    {
+      "timestamp": "2025-04-23T17:46:00.234557",
+      "model": "deepseek-chat-6.7b",
+      "prompt_tokens": 384,
+      "completion_tokens": 199,
+      "total_tokens": 583,
+      "estimated_cost": 0.00011660000000000002,
+      "request_id": "req-2",
+      "context": "Example API call 2",
+      "user_id": ""
+    },
+    {
+      "timestamp": "2025-04-23T17:46:00.234696",
+      "model": "deepseek-chat-72b",
+      "prompt_tokens": 187,
+      "completion_tokens": 149,
+      "total_tokens": 336,
+      "estimated_cost": 0.001344,
+      "request_id": "req-3",
+      "context": "Example API call 3",
+      "user_id": ""
+    },
+    {
+      "timestamp": "2025-04-23T17:46:00.234828",
+      "model": "deepseek-coder-6.7b",
+      "prompt_tokens": 257,
+      "completion_tokens": 212,
+      "total_tokens": 469,
+      "estimated_cost": 0.0002345,
+      "request_id": "req-4",
+      "context": "Example API call 4",
+      "user_id": ""
+    },
+    {
+      "timestamp": "2025-04-23T17:46:00.234981",
+      "model": "deepseek-coder-6.7b",
+      "prompt_tokens": 283,
+      "completion_tokens": 216,
+      "total_tokens": 499,
+      "estimated_cost": 0.0002495,
+      "request_id": "req-5",
+      "context": "Example API call 5",
+      "user_id": ""
+    },
+    {
+      "timestamp": "2025-04-23T17:46:00.235147",
+      "model": "deepseek-chat-72b",
+      "prompt_tokens": 217,
+      "completion_tokens": 244,
+      "total_tokens": 461,
+      "estimated_cost": 0.0018440000000000002,
+      "request_id": "req-6",
+      "context": "Example API call 6",
+      "user_id": ""
+    },
+    {
+      "timestamp": "2025-04-23T17:46:00.235315",
+      "model": "deepseek-chat-72b",
+      "prompt_tokens": 251,
+      "completion_tokens": 121,
+      "total_tokens": 372,
+      "estimated_cost": 0.0014880000000000002,
+      "request_id": "req-7",
+      "context": "Example API call 7",
+      "user_id": ""
+    },
+    {
+      "timestamp": "2025-04-23T17:46:00.235481",
+      "model": "deepseek-chat-72b",
+      "prompt_tokens": 398,
+      "completion_tokens": 297,
+      "total_tokens": 695,
+      "estimated_cost": 0.0027800000000000004,
+      "request_id": "req-8",
+      "context": "Example API call 8",
+      "user_id": ""
+    },
+    {
+      "timestamp": "2025-04-23T17:46:00.235654",
+      "model": "deepseek-chat-72b",
+      "prompt_tokens": 103,
+      "completion_tokens": 84,
+      "total_tokens": 187,
+      "estimated_cost": 0.000748,
+      "request_id": "req-9",
+      "context": "Example API call 9",
+      "user_id": ""
+    },
+    {
+      "timestamp": "2025-04-23T17:46:00.235832",
+      "model": "deepseek-chat-72b",
+      "prompt_tokens": 237,
+      "completion_tokens": 126,
+      "total_tokens": 363,
+      "estimated_cost": 0.001452,
+      "request_id": "req-10",
+      "context": "Example API call 10",
+      "user_id": ""
+    }
+  ]
+}

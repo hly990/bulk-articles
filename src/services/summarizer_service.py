@@ -11,15 +11,22 @@ Key components:
 - SummarizerConfig - Configuration for the summarizer service
 - SummarizerResult - Results from a summarization process
 
+Updates in task 4.7:
+- Added token usage tracking and optimization
+- Added adaptive prompt sizing based on token limits
+- Added budget control and token usage estimation
+
 This service coordinates between:
 1. Transcript segmentation (TranscriptSegmenter)
 2. Prompt creation (PromptAssembler)  
 3. LLM interaction (DeepSeekService)
+4. Token usage tracking (TokenUsageTracker)
 """
 
 import logging
 import time
 import threading
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -29,6 +36,14 @@ from src.services.deepseek_service import DeepSeekService, DeepSeekError
 from src.services.prompt_templates import PromptAssembler
 from src.services.transcript_segmenter import TranscriptSegmenter, SegmentManager, Segment
 
+# Import token tracker, but make it optional
+try:
+    from src.services.token_usage_tracker import TokenUsageTracker, TokenOptimizer, TokenBudgetExceededError
+except ImportError:
+    TokenUsageTracker = None  # type: ignore
+    TokenOptimizer = None  # type: ignore
+    TokenBudgetExceededError = Exception  # type: ignore
+
 
 class SummarizationStatus(Enum):
     """Status of a summarization process."""
@@ -37,6 +52,7 @@ class SummarizationStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+    BUDGET_EXCEEDED = "budget_exceeded"
 
 
 @dataclass
@@ -49,6 +65,29 @@ class GenerationMetrics:
     segment_count: int = 0
     average_tokens_per_segment: float = 0
     segment_processing_times: List[float] = field(default_factory=list)
+    token_usage_by_segment: List[Dict[str, int]] = field(default_factory=list)
+    token_savings_from_optimization: int = 0
+    estimated_cost: float = 0.0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert metrics to a dictionary for serialization."""
+        return {
+            "total_tokens_used": self.total_tokens_used,
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "generation_time_seconds": round(self.generation_time_seconds, 2),
+            "segment_count": self.segment_count,
+            "average_tokens_per_segment": round(self.average_tokens_per_segment, 2),
+            "segment_processing_times": [round(t, 2) for t in self.segment_processing_times],
+            "token_usage_by_segment": self.token_usage_by_segment,
+            "token_savings_from_optimization": self.token_savings_from_optimization,
+            "estimated_cost": round(self.estimated_cost, 4)
+        }
+    
+    def calculate_average_tokens_per_segment(self) -> None:
+        """Calculate average tokens per segment."""
+        if self.segment_count > 0:
+            self.average_tokens_per_segment = self.total_tokens_used / self.segment_count
 
 
 @dataclass
@@ -69,6 +108,12 @@ class SummarizerConfig:
     overlap_strategy: str = "sentence"
     overlap_size: int = 150
     
+    # Token optimization configuration
+    optimize_prompts: bool = True
+    adaptive_token_limits: bool = True
+    max_prompt_tokens_per_request: int = 12000
+    safety_margin: float = 0.9  # Percentage of max tokens to use (safety margin)
+    
 
 @dataclass
 class SummarizerResult:
@@ -81,6 +126,19 @@ class SummarizerResult:
     segments_used: int
     error_message: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert result to a dictionary for serialization."""
+        return {
+            "article_text": self.article_text,
+            "title": self.title,
+            "status": self.status.value,
+            "metrics": self.metrics.to_dict(),
+            "template_id": self.template_id,
+            "segments_used": self.segments_used,
+            "error_message": self.error_message,
+            "metadata": self.metadata
+        }
 
 
 class SummarizerService:
@@ -98,6 +156,7 @@ class SummarizerService:
         segmenter: Optional[TranscriptSegmenter] = None,
         config: Optional[SummarizerConfig] = None,
         logger: Optional[logging.Logger] = None,
+        token_tracker: Optional[TokenUsageTracker] = None,
     ):
         """Initialize the summarizer service.
         
@@ -113,16 +172,32 @@ class SummarizerService:
             Configuration for the summarizer
         logger : logging.Logger, optional
             Logger for the service
+        token_tracker : TokenUsageTracker, optional
+            Service for tracking token usage
         """
         self.deepseek_service = deepseek_service
         self.prompt_assembler = prompt_assembler or PromptAssembler()
         self.segmenter = segmenter or TranscriptSegmenter()
         self.config = config or SummarizerConfig()
         self.logger = logger or logging.getLogger(__name__)
+        self.token_tracker = token_tracker
+        
+        # Check if deepseek_service already has a token_tracker, and if so, use that one
+        if token_tracker is None and hasattr(deepseek_service, 'token_tracker') and deepseek_service.token_tracker:
+            self.token_tracker = deepseek_service.token_tracker
+            self.logger.debug("Using token tracker from DeepSeekService")
         
         # Track active jobs for cancellation support
         self._cancellation_flags: Dict[str, bool] = {}
         self._lock = threading.RLock()  # Add a lock for thread safety
+        
+        # Log configuration
+        self.logger.info(
+            "SummarizerService initialized with model=%s, token_tracker=%s, optimize_prompts=%s",
+            self.config.model,
+            "enabled" if self.token_tracker else "disabled",
+            self.config.optimize_prompts
+        )
     
     def is_job_cancelled(self, job_id: Optional[str]) -> bool:
         """Check if a job is marked for cancellation.
@@ -171,14 +246,42 @@ class SummarizerService:
         SummarizerResult
             The generated article and metadata
         """
+        # Generate a job ID if not provided
+        if not job_id:
+            job_id = str(uuid.uuid4())
+            
         # Initialize metrics
         metrics = GenerationMetrics()
         start_time = time.time()
         
         # Register job for cancellation if ID provided
-        if job_id:
-            with self._lock:  # Use lock for thread safety
-                self._cancellation_flags[job_id] = False
+        with self._lock:  # Use lock for thread safety
+            self._cancellation_flags[job_id] = False
+        
+        # Estimate token usage before processing
+        if self.token_tracker:
+            try:
+                estimated_tokens = self._estimate_total_tokens(transcript, template, extra_instructions)
+                self.logger.info(f"Estimated total tokens for job {job_id}: {estimated_tokens:,}")
+                
+                # Log estimation in metrics
+                metrics.metadata = metrics.metadata or {}
+                metrics.metadata["estimated_tokens"] = estimated_tokens
+                
+                # Check if we might exceed budget
+                if self.token_tracker:
+                    # This is just an estimate check, not actual tracking
+                    remaining_tokens = self.token_tracker.get_remaining_tokens()
+                    remaining_budget = self.token_tracker.get_remaining_budget()
+                    
+                    if remaining_tokens != float('inf') and estimated_tokens > remaining_tokens:
+                        self.logger.warning(
+                            f"Estimated tokens ({estimated_tokens:,}) exceeds remaining token budget "
+                            f"({remaining_tokens:,}). Proceeding anyway, but may fail during processing."
+                        )
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to estimate token usage: {e}")
         
         try:
             # Segment the transcript
@@ -204,105 +307,102 @@ class SummarizerService:
                     title="",
                     status=SummarizationStatus.CANCELLED,
                     metrics=metrics,
-                    template_id=template.id,
+                    template_id=template.template_id,
                     segments_used=0,
-                    error_message="Generation cancelled by user"
+                    error_message="Job cancelled before processing segments"
                 )
             
-            # Process each segment
-            segment_results = self._process_segments(
-                segment_manager, 
-                template, 
-                job_id, 
-                progress_callback,
-                extra_instructions
-            )
-            
-            # If we have some results but job was cancelled, combine the partial results
-            if segment_results and self.is_job_cancelled(job_id):
-                partial_article_text, partial_title = self._combine_segments(segment_results)
-                return SummarizerResult(
-                    article_text=partial_article_text,
-                    title=partial_title,
-                    status=SummarizationStatus.CANCELLED,
-                    metrics=metrics,
-                    template_id=template.id,
-                    segments_used=len(segment_results),
-                    error_message="Generation cancelled by user (partial results returned)"
-                )
-            
-            # Combine the segments
+            # Process segments
             if progress_callback:
-                progress_callback(0.9, "Combining segments...")
-            
-            article_text, title = self._combine_segments(segment_results)
-            
-            # Calculate final metrics
-            metrics.generation_time_seconds = time.time() - start_time
-            if metrics.segment_count > 0:
-                metrics.average_tokens_per_segment = metrics.total_tokens_used / metrics.segment_count
-            
-            return SummarizerResult(
-                article_text=article_text,
-                title=title,
-                status=SummarizationStatus.COMPLETED,
-                metrics=metrics,
-                template_id=template.id,
-                segments_used=len(segment_manager)
-            )
-            
-        except DeepSeekError as e:
-            self.logger.error(f"DeepSeek API error: {str(e)}")
-            return SummarizerResult(
-                article_text="",
-                title="",
-                status=SummarizationStatus.FAILED,
-                metrics=metrics,
-                template_id=template.id,
-                segments_used=0,
-                error_message=f"DeepSeek API error: {str(e)}"
-            )
-        except RuntimeError as e:
-            # Special handling for cancellation during segment processing
-            if "Job cancelled" in str(e):
-                self.logger.info(f"Job {job_id} cancelled during processing: {str(e)}")
+                progress_callback(0.2, f"Processing {len(segment_manager)} segments...")
+                
+            try:
+                segment_results = self._process_segments(segment_manager, template, job_id, progress_callback, extra_instructions)
+            except TokenBudgetExceededError as e:
+                # Handle budget exceeded error
+                return SummarizerResult(
+                    article_text="",
+                    title="",
+                    status=SummarizationStatus.BUDGET_EXCEEDED,
+                    metrics=metrics,
+                    template_id=template.template_id,
+                    segments_used=0,
+                    error_message=f"Token budget exceeded: {e}"
+                )
+                
+            # Check for cancellation
+            if self.is_job_cancelled(job_id):
                 return SummarizerResult(
                     article_text="",
                     title="",
                     status=SummarizationStatus.CANCELLED,
                     metrics=metrics,
-                    template_id=template.id,
-                    segments_used=0,
-                    error_message=f"Generation cancelled: {str(e)}"
+                    template_id=template.template_id,
+                    segments_used=len(segment_results),
+                    error_message="Job cancelled after processing segments"
                 )
-            # Regular error handling
-            self.logger.exception("Summarization failed")
+            
+            # Combine segment results
+            if progress_callback:
+                progress_callback(0.8, "Combining segments...")
+                
+            article_text, title = self._combine_segments(segment_results)
+            
+            # Complete metrics
+            metrics.generation_time_seconds = time.time() - start_time
+            metrics.calculate_average_tokens_per_segment()
+            
+            # Add estimated cost from token tracker if available
+            if self.token_tracker:
+                # This is just a rough estimation based on the tracked usage for this job
+                metrics.estimated_cost = sum([
+                    usage.get("estimated_cost", 0.0) 
+                    for usage in metrics.token_usage_by_segment
+                ])
+            
+            if progress_callback:
+                progress_callback(1.0, "Article generation complete")
+                
+            # Return the result
+            return SummarizerResult(
+                article_text=article_text,
+                title=title,
+                status=SummarizationStatus.COMPLETED,
+                metrics=metrics,
+                template_id=template.template_id,
+                segments_used=len(segment_results),
+                metadata={
+                    "token_tracking_enabled": self.token_tracker is not None,
+                    "prompt_optimization_enabled": self.config.optimize_prompts and TokenOptimizer is not None,
+                }
+            )
+                
+        except DeepSeekError as e:
+            self.logger.error(f"DeepSeek API error during article generation: {e}")
             return SummarizerResult(
                 article_text="",
                 title="",
                 status=SummarizationStatus.FAILED,
                 metrics=metrics,
-                template_id=template.id,
+                template_id=template.template_id,
                 segments_used=0,
-                error_message=str(e)
+                error_message=f"DeepSeek API error: {e}"
             )
         except Exception as e:
-            self.logger.exception("Summarization failed")
+            self.logger.exception(f"Error during article generation: {e}")
             return SummarizerResult(
                 article_text="",
                 title="",
                 status=SummarizationStatus.FAILED,
                 metrics=metrics,
-                template_id=template.id,
+                template_id=template.template_id,
                 segments_used=0,
-                error_message=str(e)
+                error_message=f"Error during generation: {e}"
             )
         finally:
             # Clean up cancellation flag
-            if job_id:
-                with self._lock:  # Use lock for thread safety
-                    if job_id in self._cancellation_flags:
-                        del self._cancellation_flags[job_id]
+            with self._lock:
+                self._cancellation_flags.pop(job_id, None)
     
     def _process_segments(
         self,
@@ -312,12 +412,12 @@ class SummarizerService:
         progress_callback: Optional[Callable[[float, str], None]],
         extra_instructions: Optional[str]
     ) -> List[Tuple[str, str]]:
-        """Process each segment to generate content.
+        """Process transcript segments to generate content.
         
         Parameters
         ----------
         segment_manager : SegmentManager
-            Manager containing all segments
+            Manager containing transcript segments
         template : Template
             The template to use for generation
         job_id : str, optional
@@ -333,173 +433,282 @@ class SummarizerService:
             List of (content, title) tuples for each segment
         """
         results = []
-        title = ""
         segment_count = len(segment_manager)
         
+        # Build initial context from first segment
+        context = ""
+        
+        # Process each segment
         for i, segment in enumerate(segment_manager):
-            # Check for cancellation
+            # Check for cancellation before processing segment
             if self.is_job_cancelled(job_id):
                 self.logger.info(f"Job {job_id} cancelled during segment processing")
                 break
-            
+                
             # Update progress
-            progress_percent = 0.1 + 0.8 * (i / max(1, segment_count))
+            progress_percentage = 0.2 + (0.6 * (i / segment_count))
             if progress_callback:
                 progress_callback(
-                    progress_percent, 
+                    progress_percentage,
                     f"Processing segment {i+1}/{segment_count}..."
                 )
+                
+            # Add extra line of logging for token tracking
+            if self.token_tracker:
+                self.logger.info(
+                    f"Processing segment {i+1}/{segment_count} - remaining budget: "
+                    f"${self.token_tracker.get_remaining_budget():.2f}, "
+                    f"remaining tokens: {self.token_tracker.get_remaining_tokens():,}"
+                )
             
-            # Set special parameters for first and last segments
+            # Get extra instructions for this segment (if any)
             segment_instructions = extra_instructions or ""
-            if segment.is_first:
-                segment_instructions += "\nThis is the first segment. Include a compelling title and introduction."
             
-            if segment.is_last:
-                segment_instructions += "\nThis is the last segment. Include a conclusive ending."
-                
-            # Add overlap context for non-first segments
-            context = ""
-            if not segment.is_first and segment.overlap_before > 0:
-                # Extract the overlap text from the beginning of this segment
-                overlap_text = segment.text[:segment.overlap_before]
-                context = f"\nContext from previous segment: {overlap_text}"
-                
-            # Process with retries
             try:
-                content, segment_title, tokens_used = self._process_single_segment(
-                    segment, 
-                    template, 
-                    segment_instructions, 
+                # Process the segment with retries
+                content, title, usage = self._process_single_segment(
+                    segment,
+                    template,
+                    segment_instructions,
                     context,
-                    job_id  # Pass job_id to check for cancellation
+                    job_id
                 )
                 
-                # Save the title from the first segment
-                if segment.is_first and segment_title:
-                    title = segment_title
+                # Add the result and update context for next segment
+                results.append((content, title))
                 
-                # Store result
-                results.append((content, segment_title))
+                # Use the generated content as context for the next segment
+                # But limit to a reasonable size to avoid token explosion
+                context = content[-1000:] if content else ""
                 
-                # Record segment processing time and token usage
-                segment_process_time = time.time()
-                self.logger.info(f"Segment {i+1}/{segment_count} processed: {tokens_used} tokens used")
             except Exception as e:
-                # If this was a cancellation, we want to preserve any results so far
-                if "Job cancelled" in str(e):
-                    self.logger.info(f"Job {job_id} cancelled while processing segment {i+1}: {str(e)}")
-                    break
-                # For other errors, re-raise
-                raise
-        
+                self.logger.error(f"Error processing segment {i+1}: {e}")
+                # Continue with next segment rather than failing the whole job
+                continue
+                
         return results
-    
+        
     def _process_single_segment(
         self, 
         segment: Segment, 
         template: Template,
         extra_instructions: str,
         context: str,
-        job_id: Optional[str] = None  # Add job_id parameter
-    ) -> Tuple[str, str, int]:
-        """Process a single segment with retries.
+        job_id: Optional[str] = None
+    ) -> Tuple[str, str, Dict[str, int]]:
+        """Process a single transcript segment using the DeepSeek API.
         
         Parameters
         ----------
         segment : Segment
-            The segment to process
+            Transcript segment to process
         template : Template
-            The template to use
+            Template to use for generation
         extra_instructions : str
-            Additional instructions
+            Additional instructions for the model
         context : str
             Context from previous segments
         job_id : str, optional
-            Identifier for cancellation checks
+            Identifier for the job
             
         Returns
         -------
-        Tuple[str, str, int]
-            (content, title, tokens_used)
+        Tuple[str, str, Dict[str, int]]
+            Tuple of (content, title, token_usage)
         """
-        combined_instructions = f"{extra_instructions}\n{context}".strip()
+        segment_start_time = time.time()
+        retry_count = 0
+        segment_id = f"{job_id}_{segment.segment_id}" if job_id else f"segment_{segment.segment_id}"
         
-        for attempt in range(self.config.max_retries):
-            try:
-                # Check for cancellation before making API call
-                if self.is_job_cancelled(job_id):
-                    raise RuntimeError("Job cancelled during segment processing")
-                    
-                # Build the prompt for this segment
-                prompt = self.prompt_assembler.build_prompt(
-                    template=template,
-                    transcript_segment=segment.text,
-                    extra_instructions=combined_instructions if combined_instructions else None
+        # Get max tokens for completion
+        max_tokens = self.config.max_tokens
+        
+        # Create the prompt
+        prompt = self.prompt_assembler.create_summary_prompt(
+            segment.text,
+            template,
+            is_continuation=(segment.segment_id > 0),
+            previous_context=context,
+            extra_instructions=extra_instructions
+        )
+        
+        # Optimize the prompt if enabled
+        original_prompt_size = None
+        optimized_prompt = prompt
+        
+        if self.config.optimize_prompts and TokenOptimizer and self.token_tracker:
+            original_prompt_size = self.token_tracker.estimate_token_count(prompt)
+            
+            # Apply optimization
+            optimized_prompt = TokenOptimizer.optimize_prompt(
+                prompt=prompt,
+                instructions=extra_instructions or "Summarize this transcript segment into an article"
+            )
+            
+            # Apply token limit if adaptive token limits are enabled
+            if self.config.adaptive_token_limits:
+                # Get adaptive max prompt tokens based on remaining budget
+                adaptive_max_tokens = min(
+                    self.config.max_prompt_tokens_per_request,
+                    int(self.token_tracker.get_remaining_tokens() * 0.8)  # Use up to 80% of remaining tokens
                 )
                 
-                # Make the API call
-                segment_start_time = time.time()
+                # Make sure we have a reasonable minimum
+                adaptive_max_tokens = max(adaptive_max_tokens, 1000)
                 
-                # TODO: Add support for timeouts and cancellation during API calls
-                # This would require modifying DeepSeekService to support timeouts
-                # and checking cancellation periodically during long API calls
+                # Truncate if needed
+                optimized_prompt = TokenOptimizer.truncate_to_token_limit(
+                    optimized_prompt, 
+                    adaptive_max_tokens, 
+                    self.token_tracker
+                )
+            
+            # Log optimization results
+            optimized_size = self.token_tracker.estimate_token_count(optimized_prompt)
+            savings = max(0, original_prompt_size - optimized_size)
+            
+            if savings > 0:
+                self.logger.info(
+                    f"Optimized prompt for segment {segment.segment_id}. "
+                    f"Original: ~{original_prompt_size} tokens, "
+                    f"Optimized: ~{optimized_size} tokens, "
+                    f"Savings: ~{savings} tokens ({savings/original_prompt_size:.1%})"
+                )
+        
+        # Create request ID for tracking
+        request_id = segment_id
+        
+        while retry_count <= self.config.max_retries:
+            try:
+                # Check for cancellation before API call
+                if self.is_job_cancelled(job_id):
+                    raise ValueError("Job cancelled during segment processing")
                 
+                # Call the API with optimized prompt
                 response = self.deepseek_service.chat_completion(
                     messages=[
-                        {"role": "system", "content": "You are an article writer that transforms video transcripts into engaging Medium-style content."},
-                        {"role": "user", "content": prompt}
+                        {"role": "user", "content": optimized_prompt}
                     ],
                     model=self.config.model,
                     temperature=self.config.temperature,
-                    max_tokens=self.config.max_tokens,
-                    top_p=self.config.top_p
+                    max_tokens=max_tokens,
+                    request_id=request_id,
+                    context=f"Segment {segment.segment_id} processing for job {job_id}"
                 )
                 
-                # Extract the title if present
-                content = response
-                title = ""
+                # Parse the response to extract title and content
+                title, content = self._parse_response(response)
                 
-                # Check for title in the format "# Title" or "Title:"
-                if content.startswith("# "):
-                    title_end = content.find("\n")
-                    if title_end > 2:
-                        title = content[2:title_end].strip()
-                elif ":" in content[:50]:
-                    title_end = content.find("\n")
-                    if title_end > 0:
-                        potential_title = content[:title_end].strip()
-                        if len(potential_title) < 100:  # Reasonable title length
-                            title = potential_title
+                # Update token usage metrics
+                segment_processing_time = time.time() - segment_start_time
                 
-                # Calculate tokens - simplified estimate for now
-                # In a real implementation, you would get exact counts from the API response
-                tokens_used = len(prompt.split()) + len(content.split())
+                # Get token usage from API if available, otherwise use estimates
+                token_usage = {}
                 
-                return content, title, tokens_used
-                
-            except DeepSeekError as e:
-                # Check for cancellation before retrying
-                if self.is_job_cancelled(job_id):
-                    raise RuntimeError("Job cancelled during retry delay")
+                if hasattr(self.deepseek_service, 'token_tracker') and self.deepseek_service.token_tracker:
+                    # Get the latest record for this request
+                    stats = self.deepseek_service.token_tracker.get_usage_stats()
                     
-                if attempt < self.config.max_retries - 1:
-                    self.logger.warning(f"DeepSeek API error, retrying: {str(e)}")
-                    time.sleep(self.config.retry_delay * (attempt + 1))  # Exponential backoff
-                else:
+                    # Find records matching this request ID
+                    matching_records = [
+                        r for r in getattr(self.deepseek_service.token_tracker, '_usage_records', [])
+                        if getattr(r, 'request_id', '') == request_id
+                    ]
+                    
+                    if matching_records:
+                        latest_record = matching_records[-1]
+                        token_usage = {
+                            "prompt_tokens": latest_record.prompt_tokens,
+                            "completion_tokens": latest_record.completion_tokens,
+                            "total_tokens": latest_record.total_tokens,
+                            "estimated_cost": latest_record.estimated_cost
+                        }
+                    else:
+                        # Fallback to estimation
+                        prompt_tokens = self.token_tracker.estimate_token_count(optimized_prompt)
+                        completion_tokens = self.token_tracker.estimate_token_count(response)
+                        token_usage = {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens,
+                            "estimated_cost": 0.0001  # Very rough estimate
+                        }
+                
+                # Update metrics
+                self.logger.info(
+                    f"Segment {segment.segment_id} processed in {segment_processing_time:.2f}s, "
+                    f"using ~{token_usage.get('total_tokens', 'unknown')} tokens"
+                )
+                
+                return content, title, token_usage
+                
+            except TokenBudgetExceededError:
+                # Don't retry, just raise the exception
+                raise
+            
+            except Exception as e:
+                retry_count += 1
+                wait_time = self.config.retry_delay * retry_count
+                
+                self.logger.warning(
+                    f"Error processing segment {segment.segment_id} (attempt {retry_count}/{self.config.max_retries}): {e}. "
+                    f"Retrying in {wait_time:.1f}s..."
+                )
+                
+                # If we've reached max retries, raise the exception
+                if retry_count > self.config.max_retries:
                     raise
-            except RuntimeError as e:
-                # Re-raise cancellation errors
-                if "Job cancelled" in str(e):
-                    raise
-                # For other runtime errors, re-raise with more context
-                raise RuntimeError(f"Failed to process segment: {str(e)}")
+                    
+                # Wait before retrying
+                time.sleep(wait_time)
         
-        # This should never be reached due to the exception in the loop
-        raise RuntimeError("Failed to process segment after all retries")
+        # This should never be reached due to the raises above, but just in case
+        raise RuntimeError(f"Failed to process segment {segment.segment_id} after {self.config.max_retries} retries")
+    
+    def _parse_response(self, response: str) -> Tuple[str, str]:
+        """Parse the model response to extract title and content.
+        
+        Parameters
+        ----------
+        response : str
+            Raw model response
+            
+        Returns
+        -------
+        Tuple[str, str]
+            Tuple of (title, content)
+        """
+        lines = response.split('\n')
+        
+        # Extract title - assume first line that starts with # or Title:
+        title = ""
+        content_start = 0
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if line.startswith('# '):
+                title = line[2:].strip()
+                content_start = i + 1
+                break
+            elif line.lower().startswith('title:'):
+                title = line[6:].strip()
+                content_start = i + 1
+                break
+                
+        # If no title found, use first sentence or first 50 chars
+        if not title and lines:
+            first_content_line = lines[0].strip()
+            title = first_content_line.split('.')[0]
+            if len(title) > 50:
+                title = title[:47] + "..."
+                
+        # Get content (everything after title)
+        content = '\n'.join(lines[content_start:]).strip()
+        
+        return title, content
     
     def _combine_segments(self, segment_results: List[Tuple[str, str]]) -> Tuple[str, str]:
-        """Combine segment results into a complete article.
+        """Combine processed segment results into a single article.
         
         Parameters
         ----------
@@ -509,42 +718,176 @@ class SummarizerService:
         Returns
         -------
         Tuple[str, str]
-            (full_article, title)
+            Tuple of (article_text, title)
         """
         if not segment_results:
             return "", ""
-        
+            
         # Use the title from the first segment
         title = segment_results[0][1]
         
-        # Combine the content, removing duplicate titles
-        combined_content = []
+        # Join content from all segments
+        content_parts = [result[0] for result in segment_results]
+        article_text = "\n\n".join(content_parts)
         
-        for i, (content, segment_title) in enumerate(segment_results):
-            # Skip the title line in non-first segments
-            if i > 0 and content.startswith("# "):
-                content = content[content.find("\n")+1:]
+        # Clean up
+        article_text = self._clean_combined_article(article_text, title)
+        
+        return article_text, title
+        
+    def _clean_combined_article(self, article_text: str, title: str) -> str:
+        """Clean up the combined article text.
+        
+        Parameters
+        ----------
+        article_text : str
+            Raw combined article text
+        title : str
+            Article title
             
-            combined_content.append(content)
+        Returns
+        -------
+        str
+            Cleaned article text
+        """
+        # Remove duplicate headings, specially if they match the title
+        lines = article_text.split('\n')
+        cleaned_lines = []
         
-        return "\n\n".join(combined_content), title
+        for line in lines:
+            stripped = line.strip()
+            # Skip lines that are just the title
+            if stripped.startswith('# ') and stripped[2:].strip().lower() == title.lower():
+                continue
+            # Skip lines with "Title:" prefix
+            if stripped.lower().startswith('title:'):
+                continue
+                
+            cleaned_lines.append(line)
+            
+        return '\n'.join(cleaned_lines)
     
+    def _estimate_total_tokens(
+        self, 
+        transcript: str, 
+        template: Template, 
+        extra_instructions: Optional[str]
+    ) -> int:
+        """Estimate the total tokens for processing a transcript.
+        
+        Parameters
+        ----------
+        transcript : str
+            Full transcript text
+        template : Template
+            Template to use for generation
+        extra_instructions : str, optional
+            Additional instructions
+            
+        Returns
+        -------
+        int
+            Estimated total tokens
+        """
+        if not self.token_tracker:
+            # Can't estimate without token tracker
+            return 0
+            
+        # Segment the transcript
+        segment_manager = self.segmenter.segment_transcript(
+            transcript,
+            max_tokens_per_segment=self.config.max_tokens_per_segment,
+            overlap_strategy=self.config.overlap_strategy,
+            overlap_size=self.config.overlap_size
+        )
+        
+        segment_count = len(segment_manager)
+        
+        # Estimate prompt token usage for a sample segment
+        sample_prompt = ""
+        if segment_count > 0:
+            # Use the first segment as a sample
+            sample_prompt = self.prompt_assembler.create_summary_prompt(
+                segment_manager[0].text,
+                template,
+                is_continuation=False,
+                extra_instructions=extra_instructions
+            )
+        
+        prompt_tokens = self.token_tracker.estimate_token_count(sample_prompt)
+        
+        # Estimate completion tokens based on configured max_tokens
+        completion_tokens = min(self.config.max_tokens, 2000)  # Use configured max tokens or 2000 as default
+        
+        # Estimate total
+        tokens_per_segment = prompt_tokens + completion_tokens
+        total_estimated = tokens_per_segment * segment_count
+        
+        return total_estimated
+        
     def cancel_job(self, job_id: str) -> bool:
-        """Cancel an in-progress summarization job.
+        """Cancel a running job.
         
         Parameters
         ----------
         job_id : str
-            The ID of the job to cancel
+            ID of the job to cancel
             
         Returns
         -------
         bool
             True if job was found and marked for cancellation, False otherwise
         """
-        with self._lock:  # Use lock for thread safety
+        with self._lock:
             if job_id in self._cancellation_flags:
                 self._cancellation_flags[job_id] = True
                 self.logger.info(f"Job {job_id} marked for cancellation")
                 return True
-            return False 
+            else:
+                self.logger.warning(f"Job {job_id} not found, can't cancel")
+                return False
+    
+    def get_token_usage_stats(self) -> Optional[Dict[str, Any]]:
+        """Get token usage statistics if token tracking is enabled.
+        
+        Returns
+        -------
+        Dict[str, Any] or None
+            Token usage statistics, or None if token tracking is disabled
+        """
+        if not self.token_tracker:
+            return None
+            
+        stats = self.token_tracker.get_usage_stats()
+        return stats.to_dict() if stats else None
+    
+    def get_remaining_budget(self) -> Dict[str, Any]:
+        """Get remaining token budget information.
+        
+        Returns
+        -------
+        Dict[str, Any]
+            Budget information
+        """
+        if not self.token_tracker:
+            return {
+                "token_tracking_enabled": False,
+                "remaining_tokens": "unlimited",
+                "remaining_budget": "unlimited"
+            }
+            
+        return {
+            "token_tracking_enabled": True,
+            "remaining_tokens": self.token_tracker.get_remaining_tokens(),
+            "remaining_budget": f"${self.token_tracker.get_remaining_budget():.2f}",
+            "budget_limit": (
+                f"${self.token_tracker.budget_limit:.2f}" 
+                if self.token_tracker.budget_limit is not None 
+                else "unlimited"
+            ),
+            "token_limit": (
+                f"{self.token_tracker.token_limit:,}" 
+                if self.token_tracker.token_limit is not None 
+                else "unlimited"
+            )
+        } 
