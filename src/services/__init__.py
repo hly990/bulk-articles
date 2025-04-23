@@ -1,4 +1,4 @@
-"""Services package initialization."""
+"""Services package for YT-Article Craft"""
 
 from importlib import metadata
 
@@ -76,6 +76,25 @@ except ModuleNotFoundError:
     SummarizationStatus = None  # type: ignore
     GenerationMetrics = None  # type: ignore
 
+# Import new services
+from .video_downloader import VideoDownloader
+from .caption_fallback import CaptionFallback
+from .subtitle_converter import (
+    SubtitleConverter, WebVTTConverter, SRTConverter, LRCConverter
+)
+from .youtube_utils import YouTubeUtils, VideoInfo
+from .transcript_segmenter import (
+    TranscriptSegmenter, Segment, SegmentManager, 
+    TokenizerInterface, SimpleTokenizer
+)
+from .prompt_templates import (
+    PromptAssembler, SectionTemplate, 
+    MEDIUM_TEMPLATES, TONE_SPECIFIC_GUIDANCE
+)
+from .article_structure_generator import (
+    ArticleStructureGenerator, ArticleFormatConfig
+)
+
 __all__ = [
     "YtDlpWrapper",
     "YtDlpError",
@@ -104,6 +123,26 @@ __all__ = [
     "SummarizerResult",
     "SummarizationStatus",
     "GenerationMetrics",
+    # New services
+    "VideoDownloader",
+    "CaptionFallback",
+    "SubtitleConverter",
+    "WebVTTConverter",
+    "SRTConverter",
+    "LRCConverter",
+    "YouTubeUtils",
+    "VideoInfo",
+    "TranscriptSegmenter",
+    "Segment",
+    "SegmentManager",
+    "TokenizerInterface",
+    "SimpleTokenizer",
+    "PromptAssembler",
+    "SectionTemplate",
+    "MEDIUM_TEMPLATES",
+    "TONE_SPECIFIC_GUIDANCE",
+    "ArticleStructureGenerator",
+    "ArticleFormatConfig"
 ]
 
 try:
