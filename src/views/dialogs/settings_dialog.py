@@ -5,7 +5,7 @@ Allows configuring application preferences
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, 
                             QWidget, QFormLayout, QLabel, QPushButton, 
                             QComboBox, QSpinBox, QCheckBox, QDialogButtonBox,
-                            QFileDialog, QLineEdit, QGroupBox)
+                            QFileDialog, QLineEdit, QGroupBox, QListWidget)
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QFontDatabase
 
@@ -89,17 +89,20 @@ class SettingsDialog(QDialog):
         self.appearance_tab = QWidget()
         self.editor_tab = QWidget()
         self.api_tab = QWidget()
+        self.templates_tab = QWidget()
         
         self.tabs.addTab(self.general_tab, "General")
         self.tabs.addTab(self.appearance_tab, "Appearance")
         self.tabs.addTab(self.editor_tab, "Editor")
         self.tabs.addTab(self.api_tab, "API Keys")
+        self.tabs.addTab(self.templates_tab, "Templates")
         
         # Setup each tab
         self._setup_general_tab()
         self._setup_appearance_tab()
         self._setup_editor_tab()
         self._setup_api_tab()
+        self._setup_templates_tab()
         
         # Button box
         self.button_box = QDialogButtonBox(
@@ -291,6 +294,120 @@ class SettingsDialog(QDialog):
         self.deepseek_base_url_edit = QLineEdit()
         layout.addRow("DeepSeek Base URL:", self.deepseek_base_url_edit)
     
+    def _setup_templates_tab(self):
+        """Set up the templates management tab"""
+        layout = QVBoxLayout(self.templates_tab)
+        
+        # Templates list
+        templates_group = QGroupBox("Saved Templates")
+        templates_layout = QVBoxLayout(templates_group)
+        
+        self.templates_list = QListWidget()
+        self.templates_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.templates_list.currentItemChanged.connect(self._on_template_selected)
+        templates_layout.addWidget(self.templates_list)
+        
+        # Template actions buttons
+        buttons_layout = QHBoxLayout()
+        self.new_template_btn = QPushButton("New")
+        self.edit_template_btn = QPushButton("Edit")
+        self.clone_template_btn = QPushButton("Clone")
+        self.delete_template_btn = QPushButton("Delete")
+        
+        self.new_template_btn.clicked.connect(self._on_new_template)
+        self.edit_template_btn.clicked.connect(self._on_edit_template)
+        self.clone_template_btn.clicked.connect(self._on_clone_template)
+        self.delete_template_btn.clicked.connect(self._on_delete_template)
+        
+        buttons_layout.addWidget(self.new_template_btn)
+        buttons_layout.addWidget(self.edit_template_btn)
+        buttons_layout.addWidget(self.clone_template_btn)
+        buttons_layout.addWidget(self.delete_template_btn)
+        buttons_layout.addStretch()
+        templates_layout.addLayout(buttons_layout)
+        
+        # Template details group
+        details_group = QGroupBox("Template Details")
+        details_layout = QFormLayout(details_group)
+        
+        self.template_name_label = QLabel("")
+        self.template_tone_label = QLabel("")
+        self.template_brand_label = QLabel("")
+        self.template_cta_label = QLabel("")
+        
+        details_layout.addRow("Name:", self.template_name_label)
+        details_layout.addRow("Tone:", self.template_tone_label)
+        details_layout.addRow("Brand Voice:", self.template_brand_label)
+        details_layout.addRow("Call to Action:", self.template_cta_label)
+        
+        # Layout
+        layout.addWidget(templates_group)
+        layout.addWidget(details_group)
+        
+        # Initially disable buttons that need selection
+        self.edit_template_btn.setEnabled(False)
+        self.clone_template_btn.setEnabled(False)
+        self.delete_template_btn.setEnabled(False)
+    
+    def _on_template_selected(self, current, previous):
+        """Handle template selection in list"""
+        has_selection = current is not None
+        self.edit_template_btn.setEnabled(has_selection)
+        self.clone_template_btn.setEnabled(has_selection)
+        self.delete_template_btn.setEnabled(has_selection)
+        
+        if has_selection:
+            # In a real implementation, this would load from the template database
+            # using the item's data. For now, just update labels with placeholder data
+            self.template_name_label.setText(current.text())
+            self.template_tone_label.setText("Professional")
+            self.template_brand_label.setText("Sample brand voice")
+            self.template_cta_label.setText("Follow for more content")
+        else:
+            self.template_name_label.setText("")
+            self.template_tone_label.setText("")
+            self.template_brand_label.setText("")
+            self.template_cta_label.setText("")
+    
+    def _on_new_template(self):
+        """Create a new template"""
+        # Placeholder - would open a template editor dialog
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "Create Template", 
+                               "Template editor would open here.")
+    
+    def _on_edit_template(self):
+        """Edit the selected template"""
+        if not self.templates_list.currentItem():
+            return
+        
+        # Placeholder - would open a template editor dialog
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "Edit Template", 
+                               f"Editing template: {self.templates_list.currentItem().text()}")
+    
+    def _on_clone_template(self):
+        """Clone the selected template"""
+        if not self.templates_list.currentItem():
+            return
+        
+        # Placeholder - would clone then open editor
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.information(self, "Clone Template", 
+                               f"Cloning template: {self.templates_list.currentItem().text()}")
+    
+    def _on_delete_template(self):
+        """Delete the selected template"""
+        if not self.templates_list.currentItem():
+            return
+        
+        # Placeholder - would confirm then delete
+        from PyQt6.QtWidgets import QMessageBox
+        if QMessageBox.question(self, "Delete Template", 
+                              f"Are you sure you want to delete '{self.templates_list.currentItem().text()}'?",
+                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            self.templates_list.takeItem(self.templates_list.currentRow())
+    
     def _browse_save_path(self):
         """Browse for save path"""
         current_path = self.save_path_edit.text() or str(self.config.get("app", "save_path", ""))
@@ -349,6 +466,12 @@ class SettingsDialog(QDialog):
         self.deepl_api_key_edit.setText(self.current_settings.get("deepl_api_key", ""))
         self.deepseek_api_key_edit.setText(self.current_settings.get("deepseek_api_key", ""))
         self.deepseek_base_url_edit.setText(self.current_settings.get("deepseek_base_url", "https://api.deepseek.com/v1"))
+        
+        # Load template list - in a real implementation, this would come from the database
+        self.templates_list.clear()
+        default_templates = ["Professional", "Casual", "Storytelling", "Technical", "Educational"]
+        for template_name in default_templates:
+            self.templates_list.addItem(template_name)
     
     def get_settings(self):
         """

@@ -32,6 +32,7 @@ class Template:
         created_at: Creation timestamp
         updated_at: Last update timestamp
         metadata: Additional metadata for the template
+        version: Version of the template
     """
     name: str
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -43,6 +44,7 @@ class Template:
     created_at: datetime.datetime = field(default_factory=datetime.datetime.now)
     updated_at: datetime.datetime = field(default_factory=datetime.datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    version: int = 1
     
     def __post_init__(self):
         """Validate the template after initialization"""
@@ -59,6 +61,9 @@ class Template:
         
         if self.tone not in valid_tones:
             raise ValueError(f"Invalid tone: {self.tone}. Must be one of: {', '.join(valid_tones)}")
+        
+        if self.version < 1:
+            raise ValueError("Version must be >= 1")
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -134,6 +139,11 @@ class Template:
             template_dict['name'] = new_name
         
         return Template.from_dict(template_dict)
+    
+    def bump_version(self):
+        """Increment template version and update timestamp."""
+        self.version += 1
+        self.updated_at = datetime.datetime.now()
     
     @classmethod
     def create_default_templates(cls) -> List['Template']:

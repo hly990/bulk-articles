@@ -52,6 +52,22 @@ def test_template_model():
     print(f"IDs different: {cloned_template.id != template.id}")
     print(f"Attributes preserved: {cloned_template.tone == template.tone}")
     
+    # Test version
+    print(f"\nInitial version: {template.version}")
+    template.bump_version()
+    print(f"After bump_version: {template.version}")
+    print(f"Updated timestamp changed: {template.updated_at > template.created_at}")
+    
+    # Test version validation
+    try:
+        invalid_template = Template(
+            name="Invalid Template",
+            version=0
+        )
+        print("ERROR: Should have raised ValueError for invalid version")
+    except ValueError as e:
+        print(f"Correctly caught invalid version: {e}")
+    
     # Test default templates
     default_templates = Template.create_default_templates()
     print(f"\nCreated {len(default_templates)} default templates:")
