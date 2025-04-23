@@ -328,7 +328,8 @@ class CaptionService:
             return self.cache.get_stats()
         return {}
     
-    def get_caption_preview(self, caption: Caption, max_lines: int = 5) -> str:
+    def get_caption_preview(self, caption: Caption, max_lines: int = 5, 
+                          format_type: str = 'default', include_metadata: bool = False) -> str:
         """Get a preview of the caption text.
         
         Parameters
@@ -337,6 +338,14 @@ class CaptionService:
             Caption to preview
         max_lines : int, default 5
             Maximum number of caption lines to include
+        format_type : str, default 'default'
+            Format type for the preview:
+            - 'default': Simple text with timestamps
+            - 'plain': Text only, no timestamps
+            - 'srt': SRT format
+            - 'html': HTML formatted preview
+        include_metadata : bool, default False
+            Whether to include caption metadata in the preview
             
         Returns
         -------
@@ -347,13 +356,179 @@ class CaptionService:
             return "No caption lines available"
         
         preview_lines = caption.lines[:max_lines]
-        preview_text = "\n".join(f"[{line.start_time:.1f}-{line.end_time:.1f}] {line.text}" 
-                                for line in preview_lines)
         
+        # Generate formatted preview based on the format_type
+        if format_type == 'plain':
+            preview_text = "\n".join(line.text for line in preview_lines)
+        elif format_type == 'srt':
+            preview_text = "\n".join(line.to_srt() for line in preview_lines)
+        elif format_type == 'html':
+            preview_lines_html = []
+            for line in preview_lines:
+                timestamp = f"[{line.start_time:.1f}s-{line.end_time:.1f}s]"
+                html_line = f'<div class="caption-line"><span class="timestamp">{timestamp}</span> <span class="text">{line.text}</span></div>'
+                preview_lines_html.append(html_line)
+            preview_text = "\n".join(preview_lines_html)
+        else:  # default
+            preview_text = "\n".join(f"[{line.start_time:.1f}-{line.end_time:.1f}] {line.text}" 
+                                    for line in preview_lines)
+        
+        # Add ellipsis if there are more lines
         if len(caption.lines) > max_lines:
-            preview_text += f"\n... and {len(caption.lines) - max_lines} more lines"
+            if format_type == 'html':
+                preview_text += f'\n<div class="more-info">... and {len(caption.lines) - max_lines} more lines</div>'
+            else:
+                preview_text += f"\n... and {len(caption.lines) - max_lines} more lines"
+        
+        # Add metadata if requested
+        if include_metadata:
+            metadata = caption.metadata
+            if format_type == 'html':
+                metadata_html = (
+                    f'<div class="caption-metadata">\n'
+                    f'  <div>Language: {metadata.language_name} ({metadata.language_code})</div>\n'
+                    f'  <div>Type: {metadata.caption_type}</div>\n'
+                    f'  <div>Auto-generated: {"Yes" if metadata.is_auto_generated else "No"}</div>\n'
+                    f'  <div>Has speaker identification: {"Yes" if metadata.has_speaker_identification else "No"}</div>\n'
+                    f'</div>\n'
+                )
+                preview_text = metadata_html + preview_text
+            else:
+                metadata_text = (
+                    f"Language: {metadata.language_name} ({metadata.language_code})\n"
+                    f"Type: {metadata.caption_type}\n"
+                    f"Auto-generated: {'Yes' if metadata.is_auto_generated else 'No'}\n"
+                    f"Has speaker identification: {'Yes' if metadata.has_speaker_identification else 'No'}\n\n"
+                )
+                preview_text = metadata_text + preview_text
         
         return preview_text
+        
+    def get_caption_previews_multilingual(self, url: str, languages: List[str] = None, 
+                                        max_lines: int = 3, format_type: str = 'default',
+                                        use_cache: bool = True) -> Dict[str, str]:
+        """Get caption previews in multiple languages for a YouTube video.
+        
+        Parameters
+        ----------
+        url : str
+            YouTube video URL or ID
+        languages : List[str], default None
+            List of language codes to get previews for.
+            If None, will get previews for all available languages.
+        max_lines : int, default 3
+            Maximum number of caption lines to include in each preview
+        format_type : str, default 'default'
+            Format type for the preview ('default', 'plain', 'srt', 'html')
+        use_cache : bool, default True
+            Whether to use cached captions if available
+            
+        Returns
+        -------
+        Dict[str, str]
+            Dictionary mapping language codes to caption previews
+        """
+        try:
+            # Get video ID for cache key
+            video_id = self._extract_video_id(url)
+            
+            # Get available captions
+            available_captions = self.get_available_captions(url)
+            
+            # If no languages specified, use all available
+            if not languages:
+                languages = []
+                for section in ['manual', 'automatic']:
+                    for caption in available_captions.get(section, []):
+                        lang = caption.get('language')
+                        if lang and lang not in languages:
+                            languages.append(lang)
+            
+            # Get previews for each language
+            previews = {}
+            for language in languages:
+                try:
+                    # Try to get manual first, then automatic
+                    try:
+                        caption = self.get_caption(
+                            url=url,
+                            language=language,
+                            source="manual",
+                            use_cache=use_cache
+                        )
+                    except CaptionError:
+                        # Fall back to automatic if manual not available
+                        caption = self.get_caption(
+                            url=url,
+                            language=language,
+                            source="automatic",
+                            use_cache=use_cache
+                        )
+                    
+                    # Generate preview
+                    preview = self.get_caption_preview(
+                        caption=caption,
+                        max_lines=max_lines,
+                        format_type=format_type,
+                        include_metadata=True
+                    )
+                    
+                    previews[language] = preview
+                    
+                except Exception as e:
+                    self.logger.warning(f"Error getting preview for language {language}: {e}")
+                    previews[language] = f"Error: {str(e)}"
+            
+            return previews
+            
+        except Exception as exc:
+            raise CaptionError(f"Failed to get multilingual previews: {exc}")
+            
+    def get_caption_preview_cached(self, video_id: str, language: str, source: str = 'manual',
+                                max_lines: int = 5, format_type: str = 'default', 
+                                include_metadata: bool = False) -> Optional[str]:
+        """Get a preview of a cached caption without redownloading.
+        
+        Parameters
+        ----------
+        video_id : str
+            YouTube video ID
+        language : str
+            Language code
+        source : str, default 'manual'
+            Caption source ('manual', 'automatic', etc.)
+        max_lines : int, default 5
+            Maximum number of caption lines to include
+        format_type : str, default 'default'
+            Format type for the preview
+        include_metadata : bool, default False
+            Whether to include caption metadata in the preview
+            
+        Returns
+        -------
+        Optional[str]
+            Preview of the caption text, or None if not in cache
+        """
+        if not self.cache_enabled or not self.cache:
+            return None
+            
+        # Try to get caption from cache
+        cached_caption = self.cache.get(
+            video_id=video_id,
+            language=language,
+            source=source
+        )
+        
+        if not cached_caption:
+            return None
+            
+        # Generate preview
+        return self.get_caption_preview(
+            caption=cached_caption,
+            max_lines=max_lines,
+            format_type=format_type,
+            include_metadata=include_metadata
+        )
     
     def _create_temp_dir(self):
         """Create a temporary directory for subtitle downloads.

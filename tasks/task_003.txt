@@ -114,7 +114,7 @@ Testing approach:
 - Integration test with videos lacking captions
 - Verify quality of fallback captions
 
-## 7. Create caption preview functionality [pending]
+## 7. Create caption preview functionality [done]
 ### Dependencies: 3.3, 3.5
 ### Description: Implement methods to generate caption previews for UI display
 ### Details:
