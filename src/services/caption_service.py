@@ -5,135 +5,27 @@ from __future__ import annotations
 Implements *task 3.1 (Setup yt-dlp integration for caption extraction)* by providing:
 
 * `CaptionService` - Main service for retrieving and managing captions from YouTube videos
-* `Caption` - Data structure for caption content and metadata
 
 This service uses the enhanced `YtDlpWrapper` to fetch subtitle tracks from videos
 and provides additional parsing, formatting, and caching capabilities.
 """
 
 import logging
+import json
 import re
-from dataclasses import dataclass, field
-from datetime import timedelta
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from .yt_dlp_wrapper import YtDlpWrapper, YtDlpError
 from .media_storage import MediaStorage
 from .youtube_utils import YouTubeValidator
+from .caption_model import Caption, CaptionLine, CaptionMetadata, CaptionError
+from .subtitle_parser import ParserFactory, ParserError
 
 __all__ = [
     "CaptionService",
-    "Caption",
-    "CaptionLine",
-    "CaptionMetadata",
-    "CaptionError",
 ]
-
-
-class CaptionError(RuntimeError):
-    """Base exception for caption-related errors."""
-
-
-@dataclass
-class CaptionLine:
-    """Represents a single line of caption with start/end times and text."""
-    
-    index: int
-    start_time: float  # seconds
-    end_time: float  # seconds
-    text: str
-    
-    def format_time(self, time_in_seconds: float) -> str:
-        """Convert time in seconds to SRT format (HH:MM:SS,mmm)."""
-        td = timedelta(seconds=time_in_seconds)
-        hours, remainder = divmod(td.seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        milliseconds = int(td.microseconds / 1000)
-        return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
-    
-    def to_srt(self) -> str:
-        """Convert caption line to SRT format."""
-        return (
-            f"{self.index}\n"
-            f"{self.format_time(self.start_time)} --> {self.format_time(self.end_time)}\n"
-            f"{self.text}\n"
-        )
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "index": self.index,
-            "start": self.start_time,
-            "end": self.end_time,
-            "text": self.text
-        }
-
-
-@dataclass
-class CaptionMetadata:
-    """Metadata for a caption track."""
-    
-    language_code: str
-    language_name: str
-    is_auto_generated: bool
-    format: str
-    source_url: str
-    video_id: str
-
-
-@dataclass
-class Caption:
-    """Represents a full caption track with metadata and content."""
-    
-    metadata: CaptionMetadata
-    lines: List[CaptionLine] = field(default_factory=list)
-    
-    def to_srt(self) -> str:
-        """Convert all caption lines to SRT format."""
-        return "\n".join(line.to_srt() for line in self.lines)
-    
-    def to_plain_text(self) -> str:
-        """Extract only text content from captions, joined with newlines."""
-        return "\n".join(line.text for line in self.lines)
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for serialization."""
-        return {
-            "metadata": {
-                "language_code": self.metadata.language_code,
-                "language_name": self.metadata.language_name,
-                "is_auto_generated": self.metadata.is_auto_generated,
-                "format": self.metadata.format,
-                "source_url": self.metadata.source_url,
-                "video_id": self.metadata.video_id,
-            },
-            "lines": [line.to_dict() for line in self.lines]
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Caption":
-        """Create Caption instance from dictionary."""
-        metadata = CaptionMetadata(
-            language_code=data["metadata"]["language_code"],
-            language_name=data["metadata"]["language_name"],
-            is_auto_generated=data["metadata"]["is_auto_generated"],
-            format=data["metadata"]["format"],
-            source_url=data["metadata"]["source_url"],
-            video_id=data["metadata"]["video_id"],
-        )
-        
-        lines = [
-            CaptionLine(
-                index=line["index"],
-                start_time=line["start"],
-                end_time=line["end"],
-                text=line["text"]
-            )
-            for line in data["lines"]
-        ]
-        
-        return cls(metadata=metadata, lines=lines)
 
 
 class CaptionService:
@@ -141,420 +33,330 @@ class CaptionService:
     
     def __init__(
         self,
-        yt_wrapper: Optional[YtDlpWrapper] = None,
-        storage: Optional[MediaStorage] = None,
-        *,
-        logger: Optional[logging.Logger] = None,
-    ) -> None:
-        self.logger = logger or logging.getLogger(__name__)
-        self.wrapper = yt_wrapper or YtDlpWrapper()
-        self.storage = storage or MediaStorage()
+        yt_dlp_wrapper,
+        cache_dir: Optional[Union[str, Path]] = None,
+        logger: Optional[logging.Logger] = None
+    ):
+        """Initialize the caption service.
         
-        # Ensure captions directory exists
-        self.captions_dir = self.storage.base_path / "captions"
-        self.captions_dir.mkdir(parents=True, exist_ok=True)
+        Parameters
+        ----------
+        yt_dlp_wrapper : YtDlpWrapper
+            Instance of YtDlpWrapper for YouTube operations
+        cache_dir : Optional[Union[str, Path]], default None
+            Directory for caching captions
+        logger : Optional[logging.Logger], default None
+            Logger for recording issues
+        """
+        self.yt_dlp = yt_dlp_wrapper
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.logger = logger or logging.getLogger(__name__)
+        
+        # Create cache directory if it doesn't exist
+        if self.cache_dir:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
     
-    def get_available_captions(self, url: str) -> Dict[str, Dict[str, Any]]:
-        """Return a dictionary of available captions for a YouTube video.
+    def get_available_captions(self, url: str) -> Dict[str, List[Dict]]:
+        """Get available captions for a YouTube video.
         
         Parameters
         ----------
         url : str
-            URL of the YouTube video
+            YouTube video URL or ID
             
         Returns
         -------
-        Dict[str, Dict[str, Any]]
-            Dictionary mapping language codes to caption information
+        Dict[str, List[Dict]]
+            Dictionary with keys 'automatic' and 'manual', each containing a list of
+            available caption tracks with their metadata
             
         Raises
         ------
         CaptionError
-            If the URL is invalid or captions cannot be retrieved
+            If there's an error retrieving captions information
         """
-        if not YouTubeValidator.is_valid(url):
-            raise CaptionError(f"Invalid YouTube URL: {url}")
-        
         try:
-            return self.wrapper.list_available_subtitles(url)
-        except YtDlpError as exc:
-            raise CaptionError(f"Failed to get available captions: {exc}") from exc
+            return self.yt_dlp.list_subtitles(url)
+        except Exception as exc:
+            raise CaptionError(f"Failed to get available captions: {exc}")
     
     def get_caption(
-        self, 
-        url: str, 
-        lang_code: str = "en", 
-        *,
-        allow_auto: bool = True,
-        use_cache: bool = True,
-        subtitle_format: str = "srt"
+        self,
+        url: str,
+        language: str = "en",
+        source: str = "manual",
+        formats: List[str] = None,
+        use_cache: bool = True
     ) -> Caption:
-        """Retrieve and parse caption for a YouTube video.
+        """Get caption for a YouTube video.
         
         Parameters
         ----------
         url : str
-            URL of the YouTube video
-        lang_code : str, default 'en'
-            Language code of the caption to retrieve
-        allow_auto : bool, default True
-            Whether to allow auto-generated captions if manual ones aren't available
+            YouTube video URL or ID
+        language : str, default 'en'
+            Language code (e.g., 'en', 'fr')
+        source : str, default 'manual'
+            Source of caption ('manual' or 'automatic')
+        formats : List[str], default None
+            List of preferred formats in order (e.g., ['vtt', 'srt'])
+            If None, defaults to ['vtt', 'srt', 'json']
         use_cache : bool, default True
             Whether to use cached captions if available
-        subtitle_format : str, default 'srt'
-            Format of the subtitle file to retrieve ('srt', 'vtt', 'json')
             
         Returns
         -------
         Caption
-            Parsed caption with metadata and content
+            Caption object with metadata and lines
             
         Raises
         ------
         CaptionError
-            If captions cannot be retrieved or parsed
+            If there's an error retrieving or parsing captions
         """
-        video_id = YouTubeValidator.extract_video_id(url)
-        if not video_id:
-            raise CaptionError(f"Could not extract video ID from URL: {url}")
+        formats = formats or ["vtt", "srt", "json"]
+        video_id = self._extract_video_id(url)
         
-        # Check if cached version exists
-        if use_cache:
-            cached_caption = self._get_cached_caption(video_id, lang_code, allow_auto)
+        # Try to get from cache first
+        if use_cache and self.cache_dir:
+            cached_caption = self._get_cached_caption(video_id, language, source)
             if cached_caption:
-                self.logger.debug("Retrieved caption from cache for video %s, language %s", 
-                                  video_id, lang_code)
+                self.logger.info(f"Using cached caption for video {video_id}, language {language}")
                 return cached_caption
         
-        # Get available captions
-        available_captions = self.get_available_captions(url)
-        
-        # Check if requested language is available
-        if lang_code not in available_captions:
-            available_langs = ", ".join(available_captions.keys())
-            raise CaptionError(
-                f"Caption in language '{lang_code}' not available for video. "
-                f"Available languages: {available_langs}"
-            )
-        
-        caption_info = available_captions[lang_code]
-        
-        # Check if caption is auto-generated and allow_auto is False
-        if caption_info.get("is_auto", False) and not allow_auto:
-            raise CaptionError(
-                f"Only auto-generated captions available for language '{lang_code}', "
-                f"but allow_auto=False"
-            )
-        
-        # Download the caption
-        try:
-            # Create a file path for the downloaded caption
-            output_path = self.captions_dir / f"{video_id}_{lang_code}.{subtitle_format}"
-            
-            # Download the caption
-            subtitle_path = self.wrapper.download_subtitle(
-                url=url,
-                lang_code=lang_code,
-                output_path=output_path,
-                auto_generated=caption_info.get("is_auto", False),
-                format=subtitle_format
-            )
-            
-            # Parse the caption
-            caption = self._parse_subtitle_file(
-                subtitle_path, 
-                video_id=video_id,
-                url=url,
-                lang_code=lang_code,
-                is_auto=caption_info.get("is_auto", False),
-                format=subtitle_format
-            )
-            
-            # Cache the caption
-            self._cache_caption(caption)
-            
-            return caption
-        
-        except (YtDlpError, IOError) as exc:
-            raise CaptionError(f"Failed to download or parse caption: {exc}") from exc
-    
-    def _parse_subtitle_file(
-        self, 
-        file_path: Path, 
-        *,
-        video_id: str,
-        url: str,
-        lang_code: str,
-        is_auto: bool,
-        format: str
-    ) -> Caption:
-        """Parse a subtitle file into a Caption object."""
-        if format.lower() == "srt":
-            return self._parse_srt_file(
-                file_path, 
-                video_id=video_id,
-                url=url,
-                lang_code=lang_code,
-                is_auto=is_auto
-            )
-        elif format.lower() == "vtt":
-            return self._parse_vtt_file(
-                file_path, 
-                video_id=video_id,
-                url=url,
-                lang_code=lang_code,
-                is_auto=is_auto
-            )
-        else:
-            raise CaptionError(f"Unsupported subtitle format: {format}")
-    
-    def _parse_srt_file(
-        self, 
-        file_path: Path, 
-        *,
-        video_id: str,
-        url: str,
-        lang_code: str,
-        is_auto: bool
-    ) -> Caption:
-        """Parse an SRT file into a Caption object."""
-        # Create metadata
+        # Prepare metadata
         metadata = CaptionMetadata(
-            language_code=lang_code,
-            language_name=self.wrapper._get_language_name(lang_code),
-            is_auto_generated=is_auto,
-            format="srt",
-            source_url=url,
-            video_id=video_id
+            video_id=video_id,
+            language_code=language,
+            language_name="Unknown",  # Will be updated after download
+            is_auto_generated=source == "automatic",
+            format="auto",  # Will be updated after download
+            source_url=url
         )
         
-        # Create caption
-        caption = Caption(metadata=metadata)
-        
-        try:
-            content = file_path.read_text(encoding="utf-8")
+        # Create a temporary directory for download
+        with self._create_temp_dir() as temp_dir:
+            temp_file = temp_dir / f"subtitle_{video_id}_{language}"
             
-            # Split into caption blocks (separated by blank lines)
-            blocks = re.split(r"\n\s*\n", content.strip())
-            
-            for block in blocks:
-                lines = block.strip().split("\n")
-                if len(lines) < 3:
-                    continue  # Skip invalid blocks
+            try:
+                # Download subtitle in preferred format
+                subtitle_info = self.yt_dlp.download_subtitle(
+                    url=url,
+                    output_path=str(temp_file),
+                    language=language,
+                    formats=formats,
+                    source=source
+                )
                 
-                try:
-                    # Parse index
-                    index = int(lines[0])
-                    
-                    # Parse time codes
-                    time_line = lines[1]
-                    time_parts = time_line.split(" --> ")
-                    if len(time_parts) != 2:
-                        continue  # Skip invalid time format
-                    
-                    start_time = self._parse_srt_time(time_parts[0])
-                    end_time = self._parse_srt_time(time_parts[1])
-                    
-                    # Join the remaining lines as the text
-                    text = "\n".join(lines[2:])
-                    
-                    # Create caption line
-                    caption_line = CaptionLine(
-                        index=index,
-                        start_time=start_time,
-                        end_time=end_time,
-                        text=text
-                    )
-                    
-                    caption.lines.append(caption_line)
-                    
-                except (ValueError, IndexError) as exc:
-                    self.logger.warning("Failed to parse caption block: %s - %s", block, exc)
-                    continue
-            
-            return caption
-            
-        except Exception as exc:
-            raise CaptionError(f"Failed to parse SRT file: {exc}") from exc
-    
-    def _parse_vtt_file(
-        self, 
-        file_path: Path, 
-        *,
-        video_id: str,
-        url: str,
-        lang_code: str,
-        is_auto: bool
-    ) -> Caption:
-        """Parse a VTT file into a Caption object."""
-        # Create metadata
-        metadata = CaptionMetadata(
-            language_code=lang_code,
-            language_name=self.wrapper._get_language_name(lang_code),
-            is_auto_generated=is_auto,
-            format="vtt",
-            source_url=url,
-            video_id=video_id
-        )
-        
-        # Create caption
-        caption = Caption(metadata=metadata)
-        
-        try:
-            content = file_path.read_text(encoding="utf-8")
-            
-            # Skip WebVTT header
-            if content.startswith("WEBVTT"):
-                content = re.sub(r"^WEBVTT.*?(?:\r\n|\r|\n){2}", "", content, flags=re.DOTALL)
-            
-            # Split into caption blocks (separated by blank lines)
-            blocks = re.split(r"\n\s*\n", content.strip())
-            
-            index = 1
-            for block in blocks:
-                lines = block.strip().split("\n")
-                if len(lines) < 2:
-                    continue  # Skip invalid blocks
+                if not subtitle_info:
+                    raise CaptionError(f"No subtitles available for video {video_id} in language {language}")
                 
-                try:
-                    # Find line with time codes (format: 00:00:00.000 --> 00:00:05.000)
-                    time_line_index = -1
-                    for i, line in enumerate(lines):
-                        if " --> " in line:
-                            time_line_index = i
-                            break
-                    
-                    if time_line_index == -1:
-                        continue  # No time line found
-                    
-                    # Parse time codes
-                    time_line = lines[time_line_index]
-                    time_parts = time_line.split(" --> ")
-                    if len(time_parts) != 2:
-                        continue  # Skip invalid time format
-                    
-                    start_time = self._parse_vtt_time(time_parts[0])
-                    end_time = self._parse_vtt_time(time_parts[1])
-                    
-                    # Join the remaining lines as the text
-                    text = "\n".join(lines[time_line_index + 1:])
-                    
-                    # Create caption line
-                    caption_line = CaptionLine(
-                        index=index,
-                        start_time=start_time,
-                        end_time=end_time,
-                        text=text
-                    )
-                    
-                    caption.lines.append(caption_line)
-                    index += 1
-                    
-                except (ValueError, IndexError) as exc:
-                    self.logger.warning("Failed to parse VTT block: %s - %s", block, exc)
-                    continue
-            
-            return caption
-            
-        except Exception as exc:
-            raise CaptionError(f"Failed to parse VTT file: {exc}") from exc
-    
-    def _parse_srt_time(self, time_str: str) -> float:
-        """Parse SRT time format (HH:MM:SS,mmm) to seconds."""
-        hours, minutes, seconds = time_str.replace(",", ".").split(":")
-        return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-    
-    def _parse_vtt_time(self, time_str: str) -> float:
-        """Parse VTT time format (HH:MM:SS.mmm) to seconds."""
-        # VTT can have different formats: 00:00.000 or 00:00:00.000
-        parts = time_str.strip().split(":")
-        
-        if len(parts) == 3:  # HH:MM:SS.mmm
-            hours, minutes, seconds = parts
-            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-        elif len(parts) == 2:  # MM:SS.mmm
-            minutes, seconds = parts
-            return int(minutes) * 60 + float(seconds)
-        else:
-            raise ValueError(f"Invalid VTT time format: {time_str}")
-    
-    def _get_cached_caption(
-        self, 
-        video_id: str, 
-        lang_code: str, 
-        allow_auto: bool
-    ) -> Optional[Caption]:
-        """Retrieve a cached caption if available."""
-        # Get path to cached caption JSON
-        cache_path = self.captions_dir / f"{video_id}_{lang_code}_caption.json"
-        
-        if not cache_path.exists():
-            return None
-        
-        try:
-            import json
-            data = json.loads(cache_path.read_text(encoding="utf-8"))
-            caption = Caption.from_dict(data)
-            
-            # Check if auto-generated caption is allowed
-            if caption.metadata.is_auto_generated and not allow_auto:
-                return None
+                # Update metadata
+                metadata.format = subtitle_info.get("ext", "auto")
+                metadata.language_name = subtitle_info.get("language_name", metadata.language_name)
                 
-            return caption
-        except Exception as exc:
-            self.logger.warning("Failed to load cached caption: %s", exc)
-            return None
+                # Parse subtitle file
+                downloaded_file = f"{temp_file}.{metadata.format}"
+                if not os.path.exists(downloaded_file):
+                    raise CaptionError(f"Downloaded subtitle file not found: {downloaded_file}")
+                
+                with open(downloaded_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                
+                caption = self._parse_subtitle_file(content, metadata)
+                
+                # Cache the caption
+                if self.cache_dir:
+                    self._cache_caption(caption)
+                
+                return caption
+                
+            except Exception as exc:
+                raise CaptionError(f"Failed to get caption: {exc}")
     
-    def _cache_caption(self, caption: Caption) -> None:
-        """Cache a caption for future use."""
-        video_id = caption.metadata.video_id
-        lang_code = caption.metadata.language_code
-        
-        # Get path to cached caption JSON
-        cache_path = self.captions_dir / f"{video_id}_{lang_code}_caption.json"
-        
-        try:
-            import json
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump(caption.to_dict(), f, ensure_ascii=False, indent=2)
-        except Exception as exc:
-            self.logger.warning("Failed to cache caption: %s", exc)
-    
-    def get_caption_preview(
-        self, 
-        url: str, 
-        lang_code: str = "en", 
-        *,
-        allow_auto: bool = True,
-        max_lines: int = 5
-    ) -> str:
-        """Get a preview of the caption for a YouTube video.
+    def _extract_video_id(self, url: str) -> str:
+        """Extract video ID from YouTube URL or return ID if already provided.
         
         Parameters
         ----------
         url : str
-            URL of the YouTube video
-        lang_code : str, default 'en'
-            Language code of the caption to retrieve
-        allow_auto : bool, default True
-            Whether to allow auto-generated captions if manual ones aren't available
+            YouTube video URL or ID
+            
+        Returns
+        -------
+        str
+            YouTube video ID
+            
+        Raises
+        ------
+        CaptionError
+            If video ID cannot be extracted
+        """
+        # Check if it's already a video ID (11 chars)
+        if re.match(r'^[a-zA-Z0-9_-]{11}$', url):
+            return url
+        
+        # Try to extract from YouTube URL
+        patterns = [
+            r'youtu\.be/([a-zA-Z0-9_-]{11})',                # youtu.be/{video_id}
+            r'youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})',    # youtube.com/watch?v={video_id}
+            r'youtube\.com/embed/([a-zA-Z0-9_-]{11})'        # youtube.com/embed/{video_id}
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group(1)
+        
+        raise CaptionError(f"Could not extract video ID from URL: {url}")
+    
+    def _parse_subtitle_file(self, content: str, metadata: CaptionMetadata) -> Caption:
+        """Parse subtitle file content into a Caption object.
+        
+        Parameters
+        ----------
+        content : str
+            Subtitle file content
+        metadata : CaptionMetadata
+            Metadata for the caption
+            
+        Returns
+        -------
+        Caption
+            Parsed caption
+            
+        Raises
+        ------
+        CaptionError
+            If there's an error parsing the subtitle file
+        """
+        try:
+            # Use ParserFactory to detect format and parse content
+            format_name = metadata.format if metadata.format != "auto" else None
+            caption = ParserFactory.parse_subtitle(
+                content=content,
+                metadata=metadata,
+                format_name=format_name,
+                logger=self.logger
+            )
+            
+            self.logger.info(f"Successfully parsed {metadata.format} subtitle with {len(caption.lines)} lines")
+            return caption
+            
+        except ParserError as exc:
+            raise CaptionError(f"Failed to parse subtitle file: {exc}")
+        except Exception as exc:
+            raise CaptionError(f"Unexpected error parsing subtitle file: {exc}")
+    
+    def _get_cached_caption(self, video_id: str, language: str, source: str) -> Optional[Caption]:
+        """Get caption from cache if available.
+        
+        Parameters
+        ----------
+        video_id : str
+            YouTube video ID
+        language : str
+            Language code
+        source : str
+            Source of caption ('manual' or 'automatic')
+            
+        Returns
+        -------
+        Optional[Caption]
+            Caption from cache, or None if not available
+        """
+        if not self.cache_dir:
+            return None
+        
+        cache_file = self.cache_dir / f"{video_id}_{language}_{source}.json"
+        
+        if not cache_file.exists():
+            return None
+        
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            return Caption.from_dict(data)
+        except Exception as exc:
+            self.logger.warning(f"Failed to load cached caption: {exc}")
+            return None
+    
+    def _cache_caption(self, caption: Caption) -> bool:
+        """Cache a caption for future use.
+        
+        Parameters
+        ----------
+        caption : Caption
+            Caption to cache
+            
+        Returns
+        -------
+        bool
+            True if caching was successful, False otherwise
+        """
+        if not self.cache_dir:
+            return False
+        
+        metadata = caption.metadata
+        # Determine source based on is_auto_generated flag
+        source = "automatic" if metadata.is_auto_generated else "manual"
+        cache_file = self.cache_dir / f"{metadata.video_id}_{metadata.language_code}_{source}.json"
+        
+        try:
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(caption.to_dict(), f, ensure_ascii=False, indent=2)
+            
+            self.logger.info(f"Caption cached to {cache_file}")
+            return True
+        except Exception as exc:
+            self.logger.warning(f"Failed to cache caption: {exc}")
+            return False
+    
+    def get_caption_preview(self, caption: Caption, max_lines: int = 5) -> str:
+        """Get a preview of the caption text.
+        
+        Parameters
+        ----------
+        caption : Caption
+            Caption to preview
         max_lines : int, default 5
-            Maximum number of lines to include in the preview
+            Maximum number of caption lines to include
             
         Returns
         -------
         str
             Preview of the caption text
         """
-        try:
-            caption = self.get_caption(url, lang_code, allow_auto=allow_auto)
-            lines = caption.lines[:max_lines]
+        if not caption.lines:
+            return "No caption lines available"
+        
+        preview_lines = caption.lines[:max_lines]
+        preview_text = "\n".join(f"[{line.start_time:.1f}-{line.end_time:.1f}] {line.text}" 
+                                for line in preview_lines)
+        
+        if len(caption.lines) > max_lines:
+            preview_text += f"\n... and {len(caption.lines) - max_lines} more lines"
+        
+        return preview_text
+    
+    def _create_temp_dir(self):
+        """Create a temporary directory for subtitle downloads.
+        Returns a context manager that will clean up the directory when done.
+        """
+        import tempfile
+        import shutil
+        
+        temp_dir = Path(tempfile.mkdtemp(prefix="youtube_subtitles_"))
+        
+        class TempDirContext:
+            def __init__(self, path):
+                self.path = path
             
-            preview_text = "\n".join(line.text for line in lines)
+            def __enter__(self):
+                return self.path
             
-            if len(caption.lines) > max_lines:
-                preview_text += "\n..."
-                
-            return preview_text
-        except CaptionError as exc:
-            return f"No preview available: {exc}" 
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                shutil.rmtree(self.path, ignore_errors=True)
+        
+        return TempDirContext(temp_dir) 
